@@ -34,19 +34,17 @@ MetaQuotes ID, then set `InpAlertPush = true` in the EA inputs.
 
 ---
 
-## 2. How it mirrors a human trader
+## 2. How it mirrors a human trader — the 3-stage pipeline
 
-| What a human does at the chart | What SmartTrader does |
-|---|---|
-| Watches every completed candle | Evaluates the **last closed** M5/M15 candle the moment a new bar opens (no repainting mid-bar) |
-| Knows what candles mean | Detects **19 candle patterns** (see §3) and grades them by strength |
-| Reads the trend | EMA20/EMA50 alignment + price location, **swing structure** (HH/HL vs LH/LL), ADX strength → `UP strong / UP / RANGE / DOWN / DOWN strong` |
-| Spots a reversal candle *in context* | A pattern only counts when its location fits (near swing support/resistance or a 20-bar extreme) |
-| Estimates where price may go | Forecast = entry, SL, TP1, TP2 (ATR-based, structure-aware) |
-| Estimates how far/long the move may go | ATR distance for targets; **expected bars to TP1** from the market's average speed; **expiry** = signal validation time |
-| Double-checks with indicator tools | **7-point validation checklist** (see §4) — thresholds **self-adapt** to the symbol and market context |
-| Glances at what history says | Scans the last 500 bars, replays **every occurrence of the same setup** and reports the real win-rate (`11/16 (69%) reached TP1 first`) |
-| Places the order and keeps watching | *(Phase 2)* — for now it tracks the live forecast on the chart and marks `TP1 OK / TP2 OK / SL X / expired` when it resolves |
+A human does not shout "SELL!" the second a reversal candle closes. He **detects**,
+then **proves**, then **projects** — SmartTrader now works in the same three stages:
+
+| Stage | What a human does | What SmartTrader does |
+|---|---|---|
+| **1. DETECT** | Watches every completed candle, knows what candles mean, reads the trend, spots a reversal in context, double-checks with indicator tools | Detects **19 patterns** (§3) on the **last closed** M5/M15 candle, reads trend (EMA + swing structure + ADX), runs the **7-point validation checklist** (§4) with self-adapting thresholds |
+| **2. PROVE** | "Is this reversal true or false?" — he *waits*, watching the next few bars: does price break the pattern high (true) or collapse back below the low (fake)? | A validated setup opens a **CANDIDATE** with a **proof window** (3 bars): `close beyond the pattern extreme` → **proved**; `close beyond the opposite extreme` → **FALSE reversal**, killed; nothing within the window → expired. The panel shows both trigger prices live |
+| **3. PROJECT** | Once proven, he looks **forward**: measuring the prior leg, he works out how far price may go over the next N bars, and only then acts | Only a **PROVED** idea issues a forecast: entry at the proof-bar close, SL behind structure, **TP1/TP2 = measured-move retracement of the prior leg (38.2% / 61.8%) with 1R/2R floors**, expected bars to TP1 from **net directional speed**, a **horizon** end time, and a live **schedule check** (`on track / behind`) comparing real progress vs the projected path |
+| Watching & learning | Glances at what history says; tracks his call to the end | Past-500-bar replay of the same setup (win-rate), live forecast tracked to `TP1 OK / TP2 OK / SL X / expired`, session scoreboard. Orders: *(Phase 2)* |
 
 ---
 
@@ -142,22 +140,45 @@ from (< 100 bars) or you set `InpDynamic = false`, it falls back to the static i
 
 ---
 
-## 5. The forecast
+## 5. The forecast — only for PROVEN ideas (stage 3)
 
-When a signal is validated, SmartTrader publishes (panel + chart lines + alert):
+Nothing is forecast when a pattern is merely validated. The forecast is issued **only
+after the proof window passes** (stage 2), and it is a genuine **forward projection**:
 
-- **Entry** — close of the signal candle (≈ next bar open, like a human acting now).
-- **Stop loss** — beyond the pattern low/high **and** the nearest swing, plus a 0.3×ATR
-  buffer, capped at 2.5×ATR so the stop stays sane.
-- **TP1** = 1.0×ATR, **TP2** = 2.0×ATR from entry (configurable).
-- **Expected duration** — bars to TP1, estimated from the average point-per-bar speed
-  of the last 50 bars.
-- **Signal validation time (expiry)** — the forecast is tracked for N bars
-  (default auto: M5 → 12 bars ≈ 1 hour, M15 → 8 bars ≈ 2 hours; dynamic mode scales
-  this with the market's current speed). After expiry it is marked `EXPIRED` — like a
-  human cancelling a setup that didn't move.
+- **Entry** — close of the **proof bar** (the candle that confirmed the reversal),
+  exactly like a human acting on confirmation, not on hope.
+- **Stop loss** — beyond the proof bar's low/high **and** the nearest swing, plus a
+  0.3×ATR buffer, capped at 2.5×ATR so the stop stays sane.
+- **Forward projection (where price may go within the horizon)** — measured move:
+  TP1 = **38.2% retracement of the prior leg**, TP2 = **61.8% retracement**, with
+  **R-floors** so the reward always matches the risk (Balanced ≥ 1R / ≥ 2R,
+  Conservative ≥ 1.5R / ≥ 3R, Aggressive ≥ 0.8R / ≥ 1.6R). If the prior leg is too
+  shallow, the R-floor takes over; if the leg is deep, the measured move extends the
+  target beyond the floor — the way a human reads retracements.
+- **Expected duration** — bars to TP1 from **net directional speed** (average bar
+  speed × path-efficiency). A choppy market needs more time to travel the same
+  distance — realistic, not optimistic.
+- **Horizon (signal validation time)** — ~2× the estimated time to TP1, never shorter
+  than the default window (M5 → 12 bars, M15 → 8), capped at 4×. At horizon end the
+  forecast is marked `EXPIRED`.
+- **Live schedule check** — the panel compares **actual progress vs the projected
+  path** every bar (`on track` / `behind`, progress % vs expected %) — a human
+  watching his trade knows whether it is "moving as expected" or "stalling".
 - **Past-history win-rate** — the same setup replayed over the last 500 bars.
-- One forecast is tracked at a time; an opposite validated signal cancels the old one.
+- **Spread sanity** — setups whose structure stop is tighter than 2× spread are
+  skipped (costs would eat the trade).
+
+### 5.1 Stability locks — no flip-flopping
+
+A human does not reverse opinion with every candle color. Version 1.40 added the
+patience rules that stopped the sell→buy→sell whipsaw seen in live testing:
+
+| Lock | Rule |
+|---|---|
+| **Flip protection** | an opposite signal can replace an active forecast only if the forecast is **≥ 3 bars old** AND the new signal carries **extra conviction** (score ≥ threshold + 1). Otherwise it's shown on the watchlist and ignored |
+| **Cooldown** | after any forecast resolves (TP/SL/expiry), new forecasts pause for **2 bars** — step back, let the dust settle |
+| **Mixed-structure rule** | a *continuation* signal when swing structure is mixed needs **+1 validation point** — continuation calls in structureless chop were the main whipsaw source |
+| **One idea at a time** | unchanged: one active forecast per chart; same-direction re-signals just keep it |
 
 Session scoreboard (W/L/X/C) and the recent outcome list show how the current session
 is going — the same feedback a trader gets from watching their own calls.
@@ -179,11 +200,11 @@ from the symbol) or internally tuned. The input window shows only:
 
 ### 6.1 What the trading style changes
 
-| Profile | Validated signal needs | Watchlist | Stop loss | Targets |
+| Profile | Validated signal needs | Watchlist | Stop loss | Targets (R = stop distance) |
 |---|---|---|---|---|
-| Conservative | 5 of 7 | 4 | wider: 0.4×ATR buffer, max 3×ATR | TP1 1.1×ATR, TP2 2.2×ATR |
-| **Balanced** (default) | 4 of 7 | 3 | 0.3×ATR buffer, max 2.5×ATR | TP1 1.0×ATR, TP2 2.0×ATR |
-| Aggressive | 3 of 7 | 3 | tighter: 0.25×ATR buffer, max 2×ATR | TP1 1.0×ATR, TP2 2.0×ATR |
+| Conservative | 5 of 7 | 4 | wider: 0.4×ATR buffer, max 3×ATR | TP1 1.5R, TP2 3R |
+| **Balanced** (default) | 4 of 7 | 3 | 0.3×ATR buffer, max 2.5×ATR | TP1 1R, TP2 2R |
+| Aggressive | 3 of 7 | 3 | tighter: 0.25×ATR buffer, max 2×ATR | TP1 0.8R, TP2 1.6R |
 
 The style also applies to the past-history replay, so the shown win-rate always
 matches the way you chose to trade. The panel header shows the active style.
