@@ -1291,7 +1291,7 @@ void StartForecast()
    g_fc.atr        = atr;
    g_fc.expBars    = expBars;
    g_fc.expiryBars = EffectiveExpiryBars(expBars);
-   g_fc.tExpire    = g_rates[1].time + (long)g_fc.expiryBars * PeriodSeconds(_Period);
+   g_fc.tExpire    = (datetime)(g_rates[1].time + (long)g_fc.expiryBars * PeriodSeconds(_Period));
    g_fc.barsLeft   = g_fc.expiryBars;
 
    HistoryScanFor(g_lastPat.code, d, g_setupType, g_fc.histWins, g_fc.histTotal);
