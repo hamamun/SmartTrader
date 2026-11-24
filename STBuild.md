@@ -56,30 +56,40 @@ Rule: no step is built until the user approves it here. Each step = few words, n
 
 ---
 
-## Step 2 — THE MAP (approved)
+## Step 2 — THE PRECISION MAP (approved, final)
 
-After trend, the trader draws the map; SmartTrader draws it in its own
-working area (panel table), NOT as chart lines.
+The trader's pencil work in the bot's own working area (panel table, NOT chart
+lines). Levels = prices where the market has memory; fights happen there.
 
-- **Levels (keep only strongest 3–6, ranked):** recent swing highs/lows,
-  trend lifeline (last HL in up-trend / LH in down-trend), session extremes
-  (day high/low; Asian range for forex), round numbers (grid per symbol type).
-- **Strength score** = touches × drama of the fight × recency; map refreshes
-  every closed bar (new fights add strength, old weak levels fade).
-- **Price location classified vs map:** at a level / between levels / at lifeline.
-- **Location is a PRIMARY GATE:** candles are only judged AT a location —
-  pattern without location = noise.
-- **What the map GIVES / what the bot does with it (the human's results):**
-  1. waiting list — no action between levels (patience is a plan)
-  2. IF/THEN pre-commitment per level: bounce-watch or break-watch decided
-     BEFORE price arrives (no in-the-moment decisions)
-  3. risk geometry: the level defines "where am I wrong" (just beyond it) —
-     stop skeleton known before any candle/setup appears
-  4. behavior read at arrival: violent rejection = defenders won (bounce
-     scenario); slow grind + close beyond = defenders lost (break scenario);
-     two-sided wicks = stand aside
-  5. flip rule: broken level reverses role (old resistance becomes expected
-     support and vice versa); map updater applies this automatically
+**Process:**
+1. Level sources (5): swing highs/lows (Step 1 structure), trend lifeline
+   (last HL/LH), session extremes (day high/low + Asian range for forex),
+   round numbers (grid per symbol type), Fibonacci pause-zones (38.2/50/61.8%
+   of last completed leg — measured with structure, never naked).
+2. Levels become thin ZONES, thickness scaled by ATR per symbol type.
+3. Strength = touches x drama x recency + stack-bonus per independent reason
+   (fib overlap, heavy volume node, round number, VWAP touch). Confluence rule:
+   a naked level is a coin flip; stacked = setup.
+4. Volume-at-price grade per zone (tick volume): fought-over = strong,
+   thin = dropped.
+5. VWAP session line: intraday control read + confluence reason.
+6. IF/THEN plan per zone (bounce-watch / break-watch / lifeline test) decided
+   BEFORE price arrives — pre-commitment, no in-the-moment decisions.
+7. Risk geometry per zone: "where am I wrong" = just beyond the zone;
+   stop skeleton known in advance.
+8. Refresh every closed bar: new fights add zones, weak fade, broken zones
+   flip role (old resistance -> expected support), fibs re-anchor to newest leg.
+
+**Outcomes:**
+- Panel map table: strongest 3-6 zones (price, type, strength, stack reasons,
+  IF/THEN expectation).
+- Price location classified: at zone / between zones / at lifeline.
+  LOCATION IS THE PRIMARY GATE - no candle judged mid-air.
+- Risk skeleton per zone, ready before any setup (feeds forecast/SL, Phase 2
+  lot sizing).
+- The prediction part done in advance: IF/THEN branches ARE the forecast;
+  arriving candles only select which branch executes.
+- Living map - refreshed continuously like the professional watches.
 
 ---
 
