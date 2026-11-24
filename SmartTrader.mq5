@@ -518,11 +518,15 @@ void ComputeModernIndicators()
      }
 
    //--- Ehlers Fisher Transform over median price
+   // NOTE series indexing: index 0 = newest, so from bar s the available
+   // OLDER bars are s..n-1  ->  lookback must be clamped to (n - s)
+   if(n < FISHER_LEN + 2)
+      return;
    double valPrev = 0, fishPrev = 0;
    for(int a = 0; a < n; a++)
      {
       int s = n - 1 - a;
-      int len = MathMin(FISHER_LEN, s + 1);
+      int len = MathMin(FISHER_LEN, n - s);
       double hh = -DBL_MAX, ll = DBL_MAX;
       for(int k = 0; k < len; k++)
         {
