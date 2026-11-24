@@ -149,15 +149,31 @@ When a signal is validated, SmartTrader publishes (panel + chart lines + alert):
 - **Entry** — close of the signal candle (≈ next bar open, like a human acting now).
 - **Stop loss** — beyond the pattern low/high **and** the nearest swing, plus a 0.3×ATR
   buffer, capped at 2.5×ATR so the stop stays sane.
-- **TP1** = 1.0×ATR, **TP2** = 2.0×ATR from entry (configurable).
-- **Expected duration** — bars to TP1, estimated from the average point-per-bar speed
-  of the last 50 bars.
-- **Signal validation time (expiry)** — the forecast is tracked for N bars
-  (default auto: M5 → 12 bars ≈ 1 hour, M15 → 8 bars ≈ 2 hours; dynamic mode scales
-  this with the market's current speed). After expiry it is marked `EXPIRED` — like a
-  human cancelling a setup that didn't move.
+- **TP1 / TP2 — R-multiples of the actual stop distance** (risk one to make one / two):
+  Balanced 1R / 2R, Conservative 1.5R / 3R, Aggressive 0.8R / 1.6R. No more "risk 50
+  points to make 28" — the reward always matches the risk taken. The past-history
+  replay uses the same formula, so the shown win-rate matches the real targets.
+- **Expected duration** — bars to TP1 estimated from **net directional speed**:
+  average bar speed × path-efficiency (Kaufman ratio). A choppy market needs more
+  time to travel the same distance — no more optimistic "~3 bars" in two-sided chop.
+- **Signal validation time (expiry)** — ~2× the estimated time to TP1, never shorter
+  than the default window (M5 → 12 bars, M15 → 8), capped at 4×. After expiry the
+  forecast is marked `EXPIRED` — like a human cancelling a setup that didn't move.
 - **Past-history win-rate** — the same setup replayed over the last 500 bars.
-- One forecast is tracked at a time; an opposite validated signal cancels the old one.
+- **Spread sanity** — if the structure stop is tighter than 2× spread, the setup is
+  skipped (costs would eat the trade).
+
+### 5.1 Stability locks — no flip-flopping
+
+A human does not reverse opinion with every candle color. Version 1.40 added the
+patience rules that stopped the sell→buy→sell whipsaw seen in live testing:
+
+| Lock | Rule |
+|---|---|
+| **Flip protection** | an opposite signal can replace an active forecast only if the forecast is **≥ 3 bars old** AND the new signal carries **extra conviction** (score ≥ threshold + 1). Otherwise it's shown on the watchlist and ignored |
+| **Cooldown** | after any forecast resolves (TP/SL/expiry), new forecasts pause for **2 bars** — step back, let the dust settle |
+| **Mixed-structure rule** | a *continuation* signal when swing structure is mixed needs **+1 validation point** — continuation calls in structureless chop were the main whipsaw source |
+| **One idea at a time** | unchanged: one active forecast per chart; same-direction re-signals just keep it |
 
 Session scoreboard (W/L/X/C) and the recent outcome list show how the current session
 is going — the same feedback a trader gets from watching their own calls.
@@ -179,11 +195,11 @@ from the symbol) or internally tuned. The input window shows only:
 
 ### 6.1 What the trading style changes
 
-| Profile | Validated signal needs | Watchlist | Stop loss | Targets |
+| Profile | Validated signal needs | Watchlist | Stop loss | Targets (R = stop distance) |
 |---|---|---|---|---|
-| Conservative | 5 of 7 | 4 | wider: 0.4×ATR buffer, max 3×ATR | TP1 1.1×ATR, TP2 2.2×ATR |
-| **Balanced** (default) | 4 of 7 | 3 | 0.3×ATR buffer, max 2.5×ATR | TP1 1.0×ATR, TP2 2.0×ATR |
-| Aggressive | 3 of 7 | 3 | tighter: 0.25×ATR buffer, max 2×ATR | TP1 1.0×ATR, TP2 2.0×ATR |
+| Conservative | 5 of 7 | 4 | wider: 0.4×ATR buffer, max 3×ATR | TP1 1.5R, TP2 3R |
+| **Balanced** (default) | 4 of 7 | 3 | 0.3×ATR buffer, max 2.5×ATR | TP1 1R, TP2 2R |
+| Aggressive | 3 of 7 | 3 | tighter: 0.25×ATR buffer, max 2×ATR | TP1 0.8R, TP2 1.6R |
 
 The style also applies to the past-history replay, so the shown win-rate always
 matches the way you chose to trade. The panel header shows the active style.

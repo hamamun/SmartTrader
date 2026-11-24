@@ -17,7 +17,7 @@
 //+------------------------------------------------------------------+
 #property copyright   "SmartTrader"
 #property link        "https://github.com/hamamun/SmartTrader"
-#property version     "1.30"
+#property version     "1.40"
 #property description "SmartTrader Phase 1 - Market Watch & Forecast."
 #property description "Reads candles and trend like a human; validation thresholds self-adapt"
 #property description "to each symbol and the current market context (dynamic percentiles)."
@@ -62,6 +62,10 @@ input int  InpSignalExpiryBars = 0;           // Signal valid for N bars (0 = au
 #define OBJ_PREFIX     "ST_"
 #define MAX_ROWS       30
 #define MAX_RECENT     5
+
+//--- forecast stability (human-like patience)
+#define FLIP_MIN_AGE   3        // min bars of an active forecast before an opposite flip may replace it
+#define COOLDOWN_BARS  2        // pause (bars) after a forecast resolves before a new one may start
 
 //--- engine tuning (internal: self-adapting, deliberately not user inputs)
 #define EMA_FAST          20     // fast EMA
@@ -264,8 +268,9 @@ int      g_minScoreWatch = 3;
 int      g_strongExtra   = 1;
 double   g_slBufATR      = 0.3;
 double   g_slMaxATR      = 2.5;
-double   g_tp1ATR        = 1.0;
-double   g_tp2ATR        = 2.0;
+double   g_tp1R          = 1.0;   // TP1 as R-multiple of the ACTUAL stop distance
+double   g_tp2R          = 2.0;   // TP2 as R-multiple
+datetime g_cooldownUntil = 0;     // stability: no new forecast before this time
 
 //--- dynamic context: thresholds re-learned from THIS symbol every closed bar
 bool     g_dynOK        = false;
@@ -308,17 +313,17 @@ void ApplyStyle()
       case ST_CONSERVATIVE:
          g_minScoreValid = 5; g_minScoreWatch = 4; g_strongExtra = 1;
          g_slBufATR = 0.40; g_slMaxATR = 3.0;
-         g_tp1ATR = 1.1; g_tp2ATR = 2.2;
+         g_tp1R = 1.5; g_tp2R = 3.0;      // wider targets: fewer, higher-conviction trades
          break;
       case ST_AGGRESSIVE:
          g_minScoreValid = 3; g_minScoreWatch = 3; g_strongExtra = 1;
          g_slBufATR = 0.25; g_slMaxATR = 2.0;
-         g_tp1ATR = 1.0; g_tp2ATR = 2.0;
+         g_tp1R = 0.8; g_tp2R = 1.6;      // quick scalps
          break;
       default:                        // balanced
          g_minScoreValid = 4; g_minScoreWatch = 3; g_strongExtra = 1;
          g_slBufATR = 0.30; g_slMaxATR = 2.5;
-         g_tp1ATR = 1.0; g_tp2ATR = 2.0;
+         g_tp1R = 1.0; g_tp2R = 2.0;      // risk one to make one / two
      }
   }
 
@@ -352,7 +357,7 @@ int OnInit()
    for(int i=0; i<MAX_RECENT; i++) g_recent[i]="";
 
    EventSetTimer(1);
-   Print("SmartTrader v1.30 Phase 1 started on ", _Symbol, " ", EnumToString(_Period),
+   Print("SmartTrader v1.40 Phase 1 started on ", _Symbol, " ", EnumToString(_Period),
          " | style: ", StyleName(),
          " | dynamic thresholds: ", (InpDynamic ? "ON" : "OFF"),
          " - market watch & forecast only, no orders will be placed.");
@@ -701,6 +706,20 @@ double AvgSpeed(int n, int s)
    double sum = 0;
    for(int i = s; i < s + n; i++) sum += MathAbs(g_rates[i].close - g_rates[i+1].close);
    return(sum / n);
+  }
+
+// Kaufman-style path efficiency: net progress / total path travelled.
+// ~1.0 = clean directional move, ~0.2 = choppy two-sided market.
+// A human knows a choppy market needs far more TIME to reach the same target.
+double EfficiencyRatio(int s, int n)
+  {
+   if(s + n + 1 >= g_window) n = g_window - s - 2;
+   if(n < 5) return(1.0);
+   double net  = MathAbs(g_rates[s].close - g_rates[s + n].close);
+   double path = 0;
+   for(int i = s; i < s + n; i++)
+      path += MathAbs(g_rates[i].close - g_rates[i + 1].close);
+   return(path > 0 ? net / path : 0);
   }
 
 // value at a given percentile (0..100) of arr[0..count-1]; sorts a copy region in place
@@ -1150,17 +1169,47 @@ void AnalyzeLastBar()
    if(chopBreakout)
       need += 1;
 
-   if(g_score >= need)
+   // a continuation call inside a structureless (mixed) market is exactly the
+   // whipsaw a human avoids - demand one extra confirmation
+   bool mixedContinuation = (g_setupType == SETUP_CONTINUATION && g_trend.swingDir == 0);
+   if(mixedContinuation)
+      need += 1;
+
+   // stability gates: a human does not flip direction with every candle
+   bool   flipBlocked = false;
+   string gateNote    = "";
+   if(g_fc.used && g_fc.status == FC_ACTIVE && g_lastPat.direction != g_fc.dir)
+     {
+      int age = (int)((g_rates[1].time - g_fc.tSignal) / PeriodSeconds(_Period));
+      if(age < FLIP_MIN_AGE || g_score < need + 1)
+        {
+         flipBlocked = true;
+         gateNote = "active " + (g_fc.dir > 0 ? "BUY" : "SELL") + " forecast protected - opposite signal ignored";
+        }
+     }
+   bool coolBlocked = (TimeCurrent() < g_cooldownUntil);
+   if(coolBlocked)
+      gateNote = "cooldown " + IntegerToString((int)((g_cooldownUntil - TimeCurrent()) / PeriodSeconds(_Period))) +
+                 " bars after last forecast";
+
+   if(g_score >= need && !flipBlocked && !coolBlocked)
      {
       g_decision = DEC_VALID;
-      if(againstStrong)    g_decisionNote = "against strong trend - extra confirmation was required";
-      else if(chopBreakout) g_decisionNote = "choppy market - breakout needed extra confirmation";
+      if(againstStrong)          g_decisionNote = "against strong trend - extra confirmation was required";
+      else if(chopBreakout)      g_decisionNote = "choppy market - breakout needed extra confirmation";
+      else if(mixedContinuation) g_decisionNote = "mixed structure - continuation needed extra confirmation";
+     }
+   else if(g_score >= need && (flipBlocked || coolBlocked))
+     {
+      g_decision = DEC_WATCH;              // gated: shown on watchlist, not acted on
+      g_decisionNote = gateNote;
      }
    else if(g_score >= g_minScoreWatch)
      {
       g_decision = DEC_WATCH;
-      if(againstStrong)    g_decisionNote = "would need " + IntegerToString(need) + "/7 against a strong trend";
-      else if(chopBreakout) g_decisionNote = "would need " + IntegerToString(need) + "/7 in a choppy market";
+      if(againstStrong)          g_decisionNote = "would need " + IntegerToString(need) + "/7 against a strong trend";
+      else if(chopBreakout)      g_decisionNote = "would need " + IntegerToString(need) + "/7 in a choppy market";
+      else if(mixedContinuation) g_decisionNote = "would need " + IntegerToString(need) + "/7 in mixed structure";
      }
    else
       g_decisionNote = "score below watchlist threshold (" + IntegerToString(g_minScoreWatch) + ")";
@@ -1203,9 +1252,9 @@ int EffectiveExpiryBars(int expBarsEstimate)
    if(!InpDynamic || !g_dynOK || expBarsEstimate <= 0)
       return(AutoExpiryBars());
    int base = AutoExpiryBars();
-   int dyn  = (int)MathRound(1.5 * expBarsEstimate);   // ~1.5x its estimated time to TP1
-   if(dyn < 4)        dyn = 4;
-   if(dyn > 3 * base) dyn = 3 * base;
+   int dyn  = 2 * expBarsEstimate;                     // ~2x its estimated time to TP1
+   if(dyn < base)    dyn = base;                       // never shorter than the default window
+   if(dyn > 4 * base) dyn = 4 * base;
    return(dyn);
   }
 
@@ -1259,7 +1308,7 @@ void StartForecast()
       g_fc.status  = FC_CANCELLED;
       g_statC++;
       PushRecent("cancelled (opposite signal)");
-      ForecastFinishDrawing();
+      DrawResolveLabel(FC_CANCELLED, g_rates[1].close);
       g_hasDone  = true;
       g_lastDone = g_fc;
       ResetForecast(g_fc);
@@ -1271,12 +1320,32 @@ void StartForecast()
    double sl = CalcSL(1, d);
    if(atr <= 0 || sl <= 0 || entry <= 0)
       return;
-   double tp1 = (d > 0 ? entry + g_tp1ATR * atr : entry - g_tp1ATR * atr);
-   double tp2 = (d > 0 ? entry + g_tp2ATR * atr : entry - g_tp2ATR * atr);
+   double slDist = MathAbs(entry - sl);
 
+   // spread sanity: the stop must be wide enough that trading costs are noise
+   double spreadPrice = (double)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) * _Point;
+   if(slDist < 2.0 * spreadPrice)
+     {
+      g_decision     = DEC_WATCH;
+      g_decisionNote = "stop too tight vs spread (" + DoubleToString(slDist / _Point, 0) +
+                       " pts) - setup skipped";
+      return;
+     }
+
+   // targets as R-multiples of the real stop distance: risk one to make one / two
+   double tp1 = (d > 0 ? entry + g_tp1R * slDist : entry - g_tp1R * slDist);
+   double tp2 = (d > 0 ? entry + g_tp2R * slDist : entry - g_tp2R * slDist);
+
+   // duration: net DIRECTIONAL speed (path efficiency), not raw average range -
+   // a choppy market simply needs more time to travel the same distance
    double speed = AvgSpeed(SPEED_BARS, 1);
    if(speed <= 0) speed = atr * 0.3;
-   int expBars = (int)MathCeil(MathAbs(tp1 - entry) / speed);
+   double er       = EfficiencyRatio(1, SPEED_BARS);
+   double dirSpeed = MathMax(speed * MathMax(er, 0.25), _Point);
+   int expBars = (int)MathCeil(MathAbs(tp1 - entry) / dirSpeed);
+   int capBars = 3 * AutoExpiryBars();
+   if(expBars < 3)       expBars = 3;
+   if(expBars > capBars) expBars = capBars;
 
    ResetForecast(g_fc);
    g_fc.used       = true;
@@ -1349,6 +1418,9 @@ void ResolveForecast(int status, double price)
    else                                     { g_statC++; PushRecent("cancelled"); }
 
    DrawResolveLabel(status, price);
+
+   // stability: brief pause before any new forecast (a human steps back after a call resolves)
+   g_cooldownUntil = (datetime)(g_rates[1].time + COOLDOWN_BARS * PeriodSeconds(_Period));
 
    g_hasDone  = true;
    g_lastDone = g_fc;
@@ -1435,9 +1507,12 @@ void HistoryScanFor(int code, int dir, int setupType, double &wins, double &tota
          continue;
       double entry = g_rates[s].close;
       double sl    = CalcSL(s, dir);
-      double tp1   = (dir > 0 ? entry + g_tp1ATR * atr : entry - g_tp1ATR * atr);
       if(sl <= 0)
          continue;
+      double slDist = MathAbs(entry - sl);
+      if(slDist <= 0)
+         continue;
+      double tp1   = (dir > 0 ? entry + g_tp1R * slDist : entry - g_tp1R * slDist);
 
       // per-signal adaptive expiry, same formula as the live forecast
       double speedH = AvgSpeed(SPEED_BARS, s);
@@ -1658,7 +1733,7 @@ void PanelRender()
    int n = 0;
 
    //--- header ---------------------------------------------------------
-   rows[n] = "SmartTrader v1.3 - Phase 1: Market Watch & Forecast  |  style: " + StyleName(); rc[n] = clrGold;      n++;
+   rows[n] = "SmartTrader v1.4 - Phase 1: Market Watch & Forecast  |  style: " + StyleName(); rc[n] = clrGold;      n++;
    rows[n] = _Symbol + "  " + StringSubstr(EnumToString(_Period), 7) +
              "  spread " + IntegerToString((int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD)) + " pts" +
              (g_statusMsg != "" ? "   [" + g_statusMsg + "]" : "");
@@ -1738,8 +1813,9 @@ void PanelRender()
    rows[n] = "FORECAST"; rc[n] = clrGold; n++;
    if(g_fc.used && g_fc.status == FC_ACTIVE)
      {
-      rows[n] = (g_fc.dir > 0 ? "BUY " : "SELL ") + g_fc.patternName + "  since " +
-                TimeToString(g_fc.tSignal, TIME_MINUTES) + "  score " +
+      int fage = (int)((TimeCurrent() - g_fc.tSignal) / PeriodSeconds(_Period));
+      rows[n] = (g_fc.dir > 0 ? "BUY " : "SELL ") + g_fc.patternName + "  age " +
+                IntegerToString(fage) + "/" + IntegerToString(g_fc.expiryBars) + " bars  score " +
                 IntegerToString(g_fc.score) + "/" + IntegerToString(g_fc.maxScore);
       rc[n] = DirColor(g_fc.dir); n++;
       rows[n] = "Entry " + DoubleToString(g_fc.entry, _Digits) +
