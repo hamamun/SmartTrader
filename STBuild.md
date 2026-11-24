@@ -69,6 +69,17 @@ working area (panel table), NOT as chart lines.
 - **Price location classified vs map:** at a level / between levels / at lifeline.
 - **Location is a PRIMARY GATE:** candles are only judged AT a location —
   pattern without location = noise.
+- **What the map GIVES / what the bot does with it (the human's results):**
+  1. waiting list — no action between levels (patience is a plan)
+  2. IF/THEN pre-commitment per level: bounce-watch or break-watch decided
+     BEFORE price arrives (no in-the-moment decisions)
+  3. risk geometry: the level defines "where am I wrong" (just beyond it) —
+     stop skeleton known before any candle/setup appears
+  4. behavior read at arrival: violent rejection = defenders won (bounce
+     scenario); slow grind + close beyond = defenders lost (break scenario);
+     two-sided wicks = stand aside
+  5. flip rule: broken level reverses role (old resistance becomes expected
+     support and vice versa); map updater applies this automatically
 
 ---
 
