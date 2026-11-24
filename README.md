@@ -81,17 +81,38 @@ Defaults: **score ≥ 4 → VALIDATED** (forecast + alert), **3 → WATCHLIST**,
 
 | Check | Buy setup wants | Sell setup wants |
 |---|---|---|
-| **RSI(14)** zone | reversal: ≤ 35 · continuation: > 50 | reversal: ≥ 65 · continuation: < 50 |
+| **RSI(14)** zone | reversal: below its dynamic oversold percentile · continuation: above its median | reversal: above dynamic overbought percentile · continuation: below median |
 | **RSI divergence** (reversals) | price lower low, RSI higher low | price higher high, RSI lower high |
-| **Stochastic(14,3,3)** | cross up from oversold (≤ 55) | cross down from overbought (≥ 45) |
-| **MACD(12,26,9)** histogram | rising | falling |
-| **Tick volume** | ≥ 1.3× of 20-bar average (real interest behind the candle) | same |
+| **QQE** (modern momentum) | fresh cross up of smoothed RSI over its adaptive trailing band (reversal) · smoothed RSI up & rising (continuation) | fresh cross down (reversal) · down & falling (continuation) |
+| **Ehlers Fisher Transform** | crossing up from the lower half (reversal) · above zero & rising (continuation) | crossing down from upper half (reversal) · below zero & falling (continuation) |
+| **Tick volume (relative)** | ≥ the symbol's own "real interest" percentile of its 20-bar average | same |
 | **Bollinger(20,2) rejection** (reversals) | pierced lower band, closed back inside | pierced upper band, closed back inside |
 | **Location** (reversals) | at swing low / 20-bar low | at swing high / 20-bar high |
 
-Continuation setups swap the last check for **ADX ≥ 20** (trend strength).
+Continuation setups swap the last check for **ADX ≥ its dynamic trend level**.
 
-All thresholds are EA inputs — you can tighten or loosen the "human judgment".
+All thresholds are EA inputs — and in dynamic mode the EA re-learns them from the
+symbol's own history (see §4.1).
+
+### 4.2 Modern engine — what replaced the classics and why
+
+An honest research note: studies comparing indicator families find **no indicator
+systematically beats the market**, and classics like MACD/RSI remain competitive —
+the real edge is *context, filtering and adaptive thresholds*, not indicator novelty.
+So SmartTrader keeps the classics that are still best-practice **structure and
+statistics tools** (RSI + divergence, Bollinger rejection, swing location, relative
+volume), and swaps/adds the modern tools that measurably do the same job better:
+
+| Classic (removed) | Modern replacement | Why it's better |
+|---|---|---|
+| Stochastic(14,3,3) fixed-level cross | **QQE** — EMA-smoothed RSI inside Wilder trailing bands (factor 4.236 = φ²) | the crossover level adapts to RSI *volatility*, killing most whipsaw crosses a fixed-level Stochastic produces |
+| MACD(12,26,9) histogram direction | **Ehlers Fisher Transform** | normalizes price into a sharp near-Gaussian oscillator — turns at extremes are much earlier and sharper than MACD histogram drift; needs a trend filter, which SmartTrader already is |
+| (nothing — new context tool) | **Choppiness Index** (>61.8 range, <38.2 trend) | a cleaner regime dial than raw ADX thresholds; drives the breakout rule |
+| (nothing — new context tool) | **TTM Squeeze** (Bollinger inside Keltner, fires on release) | detects compression→expansion; a squeeze release *exempts* a breakout from the choppy-market penalty |
+
+The panel shows `CHOP` and the squeeze state live, and every check prints the limit
+it used. Old-school purists can see exactly what changed: Stochastic and MACD are
+gone; everything else was kept deliberately.
 
 ### 4.1 Smart dynamic thresholds (default: ON)
 
@@ -148,9 +169,10 @@ is going — the same feedback a trader gets from watching their own calls.
 |---|---|
 | Chart/basic | panel corner, font size, expiry bars (0 = auto), popup/push/e-mail alerts |
 | Trend engine | EMA 20/50, ADX 14 (strong ≥ 25, trend ≥ 20), swing lookback 60 |
-| Validation | RSI 14 (35/65), Stoch 14/3/3, MACD 12/26/9, BB 20/2.0, ATR 14, volume 20 bars ×1.3, location 0.5×ATR |
+| Validation | RSI 14, BB 20/2.0, ATR 14, volume 20 bars, location 0.5×ATR (static fallbacks only — dynamic mode overrides) |
 | **Dynamic thresholds** | master switch (ON), learning lookback 300 bars, RSI percentiles 15/85, ADX percentiles 60/75, volume percentile 70, ATR regime 1.30/0.75 |
-| Scoring | validated ≥ 4, watchlist ≥ 3, +1 extra requirement against a strong trend, +1 for breakouts in contracting volatility |
+| **Modern engine** | QQE factor 4.236, Fisher lookback 9, Choppiness 14 (choppy ≥ 61.8, trending ≤ 38.2) |
+| Scoring | validated ≥ 4, watchlist ≥ 3, +1 extra requirement against a strong trend, +1 for breakouts in a choppy regime (unless a squeeze just fired) |
 | Forecast | SL buffer 0.3×ATR (max 2.5×ATR), TP1 1.0×ATR, TP2 2.0×ATR, speed window 50 bars |
 | History check | 500 bars replay |
 

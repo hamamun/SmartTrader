@@ -7,8 +7,9 @@
 //|  1. Reads every closed M5/M15 candle (20+ candle patterns).      |
 //|  2. Reads the trend (EMA alignment, swing structure, ADX).       |
 //|  3. Finds reversal / continuation setups.                        |
-//|  4. Validates the setup with 7 checks whose limits ADAPT to the  |
-//|     symbol and market context (dynamic percentiles + regime).    |
+//|  4. Validates with a modern engine: QQE (smoothed RSI + adaptive |
+//|     trailing bands), Ehlers Fisher Transform, Choppiness Index,  |
+//|     TTM squeeze, adaptive RSI/ADX/volume percentiles.            |
 //|  5. Publishes a forecast: entry, SL, TP1, TP2, expected bars,    |
 //|     expiry ("signal validation time") and past-history win-rate. |
 //|  6. Tracks the live forecast until TP1 / SL / expiry.            |
@@ -16,7 +17,7 @@
 //+------------------------------------------------------------------+
 #property copyright   "SmartTrader"
 #property link        "https://github.com/hamamun/SmartTrader"
-#property version     "1.10"
+#property version     "1.20"
 #property description "SmartTrader Phase 1 - Market Watch & Forecast."
 #property description "Reads candles and trend like a human; validation thresholds self-adapt"
 #property description "to each symbol and the current market context (dynamic percentiles)."
@@ -46,19 +47,13 @@ input int              InpSwingLookback    = 60;                // Bars to scan 
 
 input group "=== C. Validation indicators ==="
 input int              InpRSIPeriod        = 14;                // RSI period
-input double           InpRSIBuyMax        = 35.0;              // RSI oversold limit (buy reversal)
-input double           InpRSISellMin       = 65.0;              // RSI overbought limit (sell reversal)
-input int              InpStochK           = 14;                // Stochastic %K
-input int              InpStochD           = 3;                 // Stochastic %D
-input int              InpStochSlowing     = 3;                 // Stochastic slowing
-input int              InpMACDFast         = 12;                // MACD fast EMA
-input int              InpMACDSlow         = 26;                // MACD slow EMA
-input int              InpMACDSig          = 9;                 // MACD signal
+input double           InpRSIBuyMax        = 35.0;              // RSI oversold limit (buy reversal, static fallback)
+input double           InpRSISellMin       = 65.0;              // RSI overbought limit (sell reversal, static fallback)
 input int              InpBBPeriod         = 20;                // Bollinger period
 input double           InpBBDev            = 2.0;               // Bollinger deviation
 input int              InpATRPeriod        = 14;                // ATR period
 input int              InpVolAvgBars       = 20;                // Volume average bars
-input double           InpVolSpikeMult     = 1.3;               // Volume spike multiplier
+input double           InpVolSpikeMult     = 1.3;               // Volume spike multiplier (static fallback)
 input double           InpLocATRFrac       = 0.5;               // Location: within 0.5 x ATR of swing
 
 input group "=== C2. Dynamic (smart) thresholds ==="
@@ -71,6 +66,13 @@ input double           InpDynADXPctStrong  = 75.0;              // ADX percentil
 input double           InpDynVolPct        = 70.0;              // Volume percentile counting as real interest
 input double           InpDynATRExpand     = 1.30;              // ATR now / median above this = expanding volatility
 input double           InpDynATRShrink     = 0.75;              // below this = contracting volatility
+
+input group "=== C3. Modern indicator engine ==="
+input double           InpQQEFactor        = 4.236;             // QQE trailing factor (golden ratio squared)
+input int              InpFisherLen        = 9;                 // Ehlers Fisher Transform lookback
+input int              InpChopPeriod       = 14;                // Choppiness Index period
+input double           InpChopChoppy       = 61.8;              // CHOP >= this = choppy/range regime
+input double           InpChopTrend        = 38.2;              // CHOP <= this = trending regime
 
 input group "=== D. Signal scoring ==="
 input int              InpMinScoreValid    = 4;                 // Score needed for VALIDATED signal (max 7)
@@ -216,12 +218,11 @@ struct SForecast
 //====================================================================//
 
 int      hEmaFast=INVALID_HANDLE, hEmaSlow=INVALID_HANDLE, hRSI=INVALID_HANDLE;
-int      hStoch=INVALID_HANDLE,   hMACD=INVALID_HANDLE,     hATR=INVALID_HANDLE;
-int      hADX=INVALID_HANDLE,     hBands=INVALID_HANDLE;
+int      hATR=INVALID_HANDLE,     hADX=INVALID_HANDLE,     hBands=INVALID_HANDLE;
 
 MqlRates g_rates[];
-double   g_emaF[], g_emaS[], g_rsi[], g_stochK[], g_stochD[];
-double   g_macdM[], g_macdS[], g_atr[], g_adx[], g_pdi[], g_mdi[];
+double   g_emaF[], g_emaS[], g_rsi[];
+double   g_atr[], g_adx[], g_pdi[], g_mdi[];
 double   g_bbUp[], g_bbLo[];
 long     g_vol[];
 
@@ -260,15 +261,22 @@ bool     g_dynOK        = false;
 double   g_rsiLoEff     = 35.0;   // effective limits actually used by validation
 double   g_rsiHiEff     = 65.0;
 double   g_rsiMidEff    = 50.0;
-double   g_stochMidEff  = 50.0;
-double   g_stochHiEff   = 80.0;
-double   g_stochLoEff   = 20.0;
 double   g_adxTrendEff  = 20.0;
 double   g_adxStrongEff = 25.0;
 double   g_volMultEff   = 1.3;
 double   g_atrRatio     = 1.0;    // current ATR vs its own median
 int      g_volRegime    = 0;      // +1 expanding, 0 normal, -1 contracting
 string   g_dynNote      = "thresholds: static (from inputs)";
+
+//--- modern indicator engine (computed over the copied window every closed bar)
+double   g_qqeRsim[];             // QQE smoothed RSI line (series indexed)
+int      g_qqeTrend[];            // QQE trailing-band trend state: +1 up / -1 down
+double   g_fish[];                // Ehlers Fisher Transform (series indexed)
+double   g_chop1         = 50.0;  // Choppiness Index on last closed bar
+bool     g_squeezeOn1    = false; // TTM squeeze ON at last closed bar (BB inside Keltner)
+bool     g_squeezeFired  = false; // squeeze released recently
+int      g_squeezeFiredAgo = -1;
+string   g_squeezeState  = "off";
 
 //====================================================================//
 //  INIT / DEINIT                                                     //
@@ -286,15 +294,12 @@ int OnInit()
    hEmaFast = iMA(_Symbol, _Period, InpFastEMA, 0, MODE_EMA, PRICE_CLOSE);
    hEmaSlow = iMA(_Symbol, _Period, InpSlowEMA, 0, MODE_EMA, PRICE_CLOSE);
    hRSI     = iRSI(_Symbol, _Period, InpRSIPeriod, PRICE_CLOSE);
-   hStoch   = iStochastic(_Symbol, _Period, InpStochK, InpStochD, InpStochSlowing, MODE_SMA, STO_LOWHIGH);
-   hMACD    = iMACD(_Symbol, _Period, InpMACDFast, InpMACDSlow, InpMACDSig, PRICE_CLOSE);
    hATR     = iATR(_Symbol, _Period, InpATRPeriod);
    hADX     = iADX(_Symbol, _Period, InpADXPeriod);
    hBands   = iBands(_Symbol, _Period, InpBBPeriod, 0, InpBBDev, PRICE_CLOSE);
 
    if(hEmaFast==INVALID_HANDLE || hEmaSlow==INVALID_HANDLE || hRSI==INVALID_HANDLE ||
-      hStoch==INVALID_HANDLE   || hMACD==INVALID_HANDLE   || hATR==INVALID_HANDLE ||
-      hADX==INVALID_HANDLE     || hBands==INVALID_HANDLE)
+      hATR==INVALID_HANDLE     || hADX==INVALID_HANDLE     || hBands==INVALID_HANDLE)
      {
       Print("SmartTrader: failed to create indicator handles, error ", GetLastError());
       return(INIT_FAILED);
@@ -305,7 +310,7 @@ int OnInit()
    for(int i=0; i<MAX_RECENT; i++) g_recent[i]="";
 
    EventSetTimer(1);
-   Print("SmartTrader v1.10 Phase 1 started on ", _Symbol, " ", EnumToString(_Period),
+   Print("SmartTrader v1.20 Phase 1 started on ", _Symbol, " ", EnumToString(_Period),
          " - market watch & forecast only, no orders will be placed.",
          (InpDynamic ? " Dynamic thresholds: ON." : " Dynamic thresholds: OFF (static inputs)."));
 
@@ -338,6 +343,7 @@ void OnTick()
      }
 
    // 0. re-learn this symbol's normal behavior (dynamic thresholds)
+   ComputeModernIndicators();
    UpdateDynamicContext();
 
    // 1. track the running forecast against the bar that just closed
@@ -386,9 +392,8 @@ void UpdateData()
 
    ArraySetAsSeries(g_rates, true);
    ArraySetAsSeries(g_emaF,  true);  ArraySetAsSeries(g_emaS,  true);
-   ArraySetAsSeries(g_rsi,   true);  ArraySetAsSeries(g_stochK,true);
-   ArraySetAsSeries(g_stochD,true);  ArraySetAsSeries(g_macdM,true);
-   ArraySetAsSeries(g_macdS, true);  ArraySetAsSeries(g_atr,  true);
+   ArraySetAsSeries(g_rsi,   true);
+   ArraySetAsSeries(g_atr,   true);
    ArraySetAsSeries(g_adx,   true);  ArraySetAsSeries(g_pdi,  true);
    ArraySetAsSeries(g_mdi,   true);  ArraySetAsSeries(g_bbUp, true);
    ArraySetAsSeries(g_bbLo,  true);  ArraySetAsSeries(g_vol,  true);
@@ -404,10 +409,6 @@ void UpdateData()
    if(CopyBuffer(hEmaFast,0,0,copied,g_emaF)  < copied) return;
    if(CopyBuffer(hEmaSlow,0,0,copied,g_emaS)  < copied) return;
    if(CopyBuffer(hRSI,    0,0,copied,g_rsi)   < copied) return;
-   if(CopyBuffer(hStoch,  0,0,copied,g_stochK)< copied) return;
-   if(CopyBuffer(hStoch,  1,0,copied,g_stochD)< copied) return;
-   if(CopyBuffer(hMACD,   0,0,copied,g_macdM) < copied) return;
-   if(CopyBuffer(hMACD,   1,0,copied,g_macdS) < copied) return;
    if(CopyBuffer(hATR,    0,0,copied,g_atr)   < copied) return;
    if(CopyBuffer(hADX,    0,0,copied,g_adx)   < copied) return;
    if(CopyBuffer(hADX,    1,0,copied,g_pdi)   < copied) return;
@@ -418,6 +419,106 @@ void UpdateData()
 
    g_dataOK  = true;
    g_statusMsg = "";
+  }
+
+//====================================================================//
+//  MODERN INDICATOR ENGINE                                           //
+//====================================================================//
+//  Replacements / additions over the classic toolkit, all computed
+//  from data we already copy (no extra handles needed):
+//    QQE      - smoothed RSI with Wilder trailing bands (factor 4.236):
+//               replaces Stochastic as the momentum-shift check, far less
+//               whipsaw because the crossover level adapts to RSI volatility
+//    Fisher   - Ehlers Fisher Transform: normalizes price into a sharp
+//               near-Gaussian oscillator; turns at extremes are much sharper
+//               than MACD histogram drift
+//    CHOP     - Choppiness Index (Dreiss): >61.8 range, <38.2 trend;
+//               the regime dial behind the breakout rule
+//    Squeeze  - TTM squeeze (BB inside Keltner EMA20 +/- 1.5 ATR):
+//               compression -> expansion detection for breakouts
+
+void ComputeModernIndicators()
+  {
+   int n = g_window;
+   ArrayResize(g_qqeRsim, n);
+   ArrayResize(g_qqeTrend, n);
+   ArrayResize(g_fish, n);
+
+   //--- QQE: EMA(5) of RSI + Wilder(14) of its change -> trailing bands
+   double rsimPrev = 0, darPrev = 0, trailPrev = 0, longPrev = 0, shortPrev = 0;
+   int    trendPrev = 1;
+   for(int a = 0; a < n; a++)
+     {
+      int s = n - 1 - a;                       // series shift of this step
+      double alpha = 2.0 / 6.0;                // EMA(5)
+      double rsim  = (a == 0 ? g_rsi[s] : rsimPrev + alpha * (g_rsi[s] - rsimPrev));
+      double d     = (a == 0 ? 0 : MathAbs(rsim - rsimPrev));
+      double dar   = (a == 0 ? d : darPrev + (d - darPrev) / 14.0);   // Wilder(14)
+      double longB  = rsim - InpQQEFactor * dar;
+      double shortB = rsim + InpQQEFactor * dar;
+      int tr = trendPrev;
+      if(a > 0)
+        {
+         if(tr == -1 && rsim > shortPrev) tr = 1;
+         if(tr ==  1 && rsim < longPrev)  tr = -1;
+        }
+      double trail;
+      if(a == 0)            trail = (tr == 1 ? longB : shortB);
+      else if(tr == 1)      trail = MathMax(longB,  trailPrev);
+      else                  trail = MathMin(shortB, trailPrev);
+      if(a > 0 && tr != trendPrev)                 // trend just flipped: restart band
+         trail = (tr == 1 ? longB : shortB);
+      g_qqeRsim[s]  = rsim;
+      g_qqeTrend[s] = tr;
+      rsimPrev = rsim; darPrev = dar; trailPrev = trail;
+      longPrev = longB; shortPrev = shortB; trendPrev = tr;
+     }
+
+   //--- Ehlers Fisher Transform over median price
+   double valPrev = 0, fishPrev = 0;
+   for(int a = 0; a < n; a++)
+     {
+      int s = n - 1 - a;
+      int len = MathMin(InpFisherLen, s + 1);
+      double hh = -DBL_MAX, ll = DBL_MAX;
+      for(int k = 0; k < len; k++)
+        {
+         double mid = 0.5 * (g_rates[s + k].high + g_rates[s + k].low);
+         if(mid > hh) hh = mid;
+         if(mid < ll) ll = mid;
+        }
+      double mid0 = 0.5 * (g_rates[s].high + g_rates[s].low);
+      double raw  = (hh - ll > 0 ? 2.0 * (mid0 - ll) / (hh - ll) - 1.0 : 0.0);
+      double val  = 0.33 * raw + 0.67 * valPrev;
+      if(val >  0.999) val =  0.999;
+      if(val < -0.999) val = -0.999;
+      double fish = 0.5 * MathLog((1 + val) / (1 - val)) + 0.5 * fishPrev;
+      g_fish[s]  = fish;
+      valPrev = val; fishPrev = fish;
+     }
+
+   //--- Choppiness Index on the last closed bar
+   int per = MathMin(InpChopPeriod, g_window - 2);
+   double chH = HighestHigh(1, per), chL = LowestLow(1, per);
+   double sumA = 0;
+   for(int k = 1; k <= per; k++) sumA += g_atr[k];
+   g_chop1 = 100.0 * MathLog10((chH - chL) > 0 ? sumA / (chH - chL) : 1.0000001) / MathLog10((double)per);
+
+   //--- TTM squeeze state (Bollinger inside Keltner = compression)
+   g_squeezeOn1 = (g_bbUp[1] < g_emaF[1] + 1.5 * g_atr[1]) && (g_bbLo[1] > g_emaF[1] - 1.5 * g_atr[1]);
+   g_squeezeFired = false;
+   g_squeezeFiredAgo = -1;
+   if(!g_squeezeOn1)
+     {
+      for(int s = 2; s <= 8 && s < g_window; s++)
+        {
+         bool on = (g_bbUp[s] < g_emaF[s] + 1.5 * g_atr[s]) &&
+                   (g_bbLo[s] > g_emaF[s] - 1.5 * g_atr[s]);
+         if(on) { g_squeezeFired = true; g_squeezeFiredAgo = s - 1; break; }
+        }
+     }
+   g_squeezeState = g_squeezeOn1 ? "ON (compressed)"
+                                 : (g_squeezeFired ? "FIRED " + IntegerToString(g_squeezeFiredAgo) + " bars ago" : "off");
   }
 
 //====================================================================//
@@ -443,9 +544,6 @@ void UpdateDynamicContext()
    g_rsiLoEff     = InpRSIBuyMax;
    g_rsiHiEff     = InpRSISellMin;
    g_rsiMidEff    = 50.0;
-   g_stochMidEff  = 50.0;
-   g_stochHiEff   = 80.0;
-   g_stochLoEff   = 20.0;
    g_adxTrendEff  = InpADXTrendMin;
    g_adxStrongEff = InpADXStrong;
    g_volMultEff   = InpVolSpikeMult;
@@ -474,12 +572,6 @@ void UpdateDynamicContext()
    g_rsiHiEff  = PercentileOf(tmp, n, InpDynRSIPctHigh);
    g_rsiMidEff = PercentileOf(tmp, n, 50.0);
 
-   //--- stochastic mid band
-   for(int i = 0; i < n; i++) tmp[i] = g_stochK[1 + i];
-   g_stochMidEff = PercentileOf(tmp, n, 50.0);
-   g_stochHiEff  = PercentileOf(tmp, n, 80.0);
-   g_stochLoEff  = PercentileOf(tmp, n, 20.0);
-
    //--- ADX trend / strong levels
    for(int i = 0; i < n; i++) tmp[i] = g_adx[1 + i];
    g_adxTrendEff  = PercentileOf(tmp, n, InpDynADXPctTrend);
@@ -505,8 +597,8 @@ void UpdateDynamicContext()
    else if(g_atrRatio <= InpDynATRShrink) g_volRegime = -1;
 
    g_dynOK = true;
-   g_dynNote = StringFormat("thresholds: DYNAMIC  RSI %.1f/%.1f  Stoch mid %.1f  ADX %.0f/%.0f  Vol >= %.2fx  ATR %.2fx med",
-                            g_rsiLoEff, g_rsiHiEff, g_stochMidEff,
+   g_dynNote = StringFormat("thresholds: DYNAMIC  RSI %.1f/%.1f  ADX %.0f/%.0f  Vol >= %.2fx  ATR %.2fx med",
+                            g_rsiLoEff, g_rsiHiEff,
                             g_adxTrendEff, g_adxStrongEff, g_volMultEff, g_atrRatio);
   }
 
@@ -859,26 +951,50 @@ void ValidateSetup(const SPattern &pat, const STrend &tr, const SSwings &sw,
    else
       AddCheck(ck, n, "RSI divergence", CK_NA, reversal ? "needs 2 swings in lookback" : "reversal setups only");
 
-   //--- 3. Stochastic ---------------------------------------------------
-   double k1=g_stochK[1], dd1=g_stochD[1], k2=g_stochK[2], dd2=g_stochD[2], k3=g_stochK[3], dd3=g_stochD[3];
-   bool crossUp = (k1 > dd1 && k2 <= dd2) || (k2 > dd2 && k3 <= dd3);
-   bool crossDn = (k1 < dd1 && k2 >= dd2) || (k2 < dd2 && k3 >= dd3);
-   bool okS;
+   //--- 3. QQE (modern momentum): smoothed RSI vs adaptive trailing bands -
+   //       replaces Stochastic: the cross level adapts to RSI volatility,
+   //       filtering the whipsaw crosses a fixed-level Stochastic produces
+   bool qqeBuyFresh  = (g_qqeTrend[1] ==  1 && g_qqeTrend[2] == -1) ||
+                       (g_qqeTrend[1] ==  1 && g_qqeTrend[2] ==  1 && g_qqeTrend[3] == -1);
+   bool qqeSellFresh = (g_qqeTrend[1] == -1 && g_qqeTrend[2] ==  1) ||
+                       (g_qqeTrend[1] == -1 && g_qqeTrend[2] == -1 && g_qqeTrend[3] ==  1);
+   bool okQ; string detQ;
    if(reversal)
-      okS = d > 0 ? (crossUp && k1 <= g_stochMidEff) : (crossDn && k1 >= g_stochMidEff);
+     {
+      okQ  = d > 0 ? qqeBuyFresh : qqeSellFresh;
+      detQ = StringFormat("smoothed RSI %.1f, trend %s%s", g_qqeRsim[1],
+                          (g_qqeTrend[1] > 0 ? "up" : "down"), okQ ? ", fresh cross" : ", no fresh cross");
+     }
    else
-      okS = d > 0 ? (k1 > dd1 && k1 > g_stochMidEff && k1 < g_stochHiEff)
-                  : (k1 < dd1 && k1 < g_stochMidEff && k1 > g_stochLoEff);
-   AddCheck(ck, n, "Stochastic", okS ? CK_PASS : CK_FAIL,
-            StringFormat("%%K %.1f %%D %.1f (mid %.1f%s)%s", k1, dd1, g_stochMidEff, dyn,
-                         crossUp ? " crossUp" : (crossDn ? " crossDn" : "")));
+     {
+      bool momUp = (g_qqeTrend[1] ==  1 && g_qqeRsim[1] > g_qqeRsim[2]);
+      bool momDn = (g_qqeTrend[1] == -1 && g_qqeRsim[1] < g_qqeRsim[2]);
+      okQ  = d > 0 ? momUp : momDn;
+      detQ = StringFormat("smoothed RSI %.1f %s, trend %s", g_qqeRsim[1],
+                          (g_qqeRsim[1] >= g_qqeRsim[2] ? "rising" : "falling"),
+                          (g_qqeTrend[1] > 0 ? "up" : "down"));
+     }
+   AddCheck(ck, n, "QQE", okQ ? CK_PASS : CK_FAIL, detQ);
 
-   //--- 4. MACD histogram direction --------------------------------------
-   double h1 = g_macdM[1] - g_macdS[1];
-   double h2 = g_macdM[2] - g_macdS[2];
-   bool okM = d > 0 ? (h1 > h2) : (h1 < h2);
-   AddCheck(ck, n, "MACD", okM ? CK_PASS : CK_FAIL,
-            StringFormat("hist %s -> %s", DoubleToString(h2, _Digits + 1), DoubleToString(h1, _Digits + 1)));
+   //--- 4. Ehlers Fisher Transform: sharp turn detection -------------------
+   //       replaces MACD histogram drift; the transform spikes and reverses
+   //       exactly at momentum extremes, giving earlier turn confirmation
+   double f1 = g_fish[1], f2 = g_fish[2];
+   bool okF; string detF;
+   if(reversal)
+     {
+      bool turnUp = (f1 > f2) && (f2 < 0.0);   // crossing up from lower half
+      bool turnDn = (f1 < f2) && (f2 > 0.0);   // crossing down from upper half
+      okF  = d > 0 ? turnUp : turnDn;
+      detF = StringFormat("fisher %.2f -> %.2f (%s)", f2, f1, okF ? "turn confirmed" : "no turn");
+     }
+   else
+     {
+      okF  = d > 0 ? (f1 > f2 && f1 > 0) : (f1 < f2 && f1 < 0);
+      detF = StringFormat("fisher %.2f %s zero, %s", f1, (f1 > 0 ? "above" : "below"),
+                          (d > 0 ? (f1 > f2 ? "rising" : "flat/falling") : (f1 < f2 ? "falling" : "flat/rising")));
+     }
+   AddCheck(ck, n, "Fisher", okF ? CK_PASS : CK_FAIL, detF);
 
    //--- 5. Volume spike ---------------------------------------------------
    double vAvg = AvgVol(InpVolAvgBars, 2);
@@ -980,23 +1096,24 @@ void AnalyzeLastBar()
    if(againstStrong)
       need += InpStrongTrendExtra;
 
-   // market-context rule: in compressed (contracting) volatility, momentum
-   // breakouts fail more often - demand one extra confirmation
-   bool lowVolBreakout = (g_dynOK && g_volRegime < 0 && g_setupType == SETUP_CONTINUATION);
-   if(lowVolBreakout)
+   // market-context rule: in a choppy regime momentum breakouts usually fail,
+   // UNLESS a volatility squeeze just fired (compression released with force)
+   bool chopBreakout = (g_setupType == SETUP_CONTINUATION &&
+                        g_chop1 >= InpChopChoppy && !g_squeezeFired);
+   if(chopBreakout)
       need += 1;
 
    if(g_score >= need)
      {
       g_decision = DEC_VALID;
-      if(againstStrong)       g_decisionNote = "against strong trend - extra confirmation was required";
-      else if(lowVolBreakout) g_decisionNote = "low volatility - breakout needs extra confirmation";
+      if(againstStrong)    g_decisionNote = "against strong trend - extra confirmation was required";
+      else if(chopBreakout) g_decisionNote = "choppy market - breakout needed extra confirmation";
      }
    else if(g_score >= InpMinScoreWatch)
      {
       g_decision = DEC_WATCH;
-      if(againstStrong)       g_decisionNote = "would need " + IntegerToString(need) + "/7 against a strong trend";
-      else if(lowVolBreakout) g_decisionNote = "would need " + IntegerToString(need) + "/7 in low volatility";
+      if(againstStrong)    g_decisionNote = "would need " + IntegerToString(need) + "/7 against a strong trend";
+      else if(chopBreakout) g_decisionNote = "would need " + IntegerToString(need) + "/7 in a choppy market";
      }
    else
       g_decisionNote = "score below watchlist threshold (" + IntegerToString(InpMinScoreWatch) + ")";
@@ -1494,7 +1611,7 @@ void PanelRender()
    int n = 0;
 
    //--- header ---------------------------------------------------------
-   rows[n] = "SmartTrader v1.1 - Phase 1: Market Watch & Forecast"; rc[n] = clrGold;      n++;
+   rows[n] = "SmartTrader v1.2 - Phase 1: Market Watch & Forecast"; rc[n] = clrGold;      n++;
    rows[n] = _Symbol + "  " + StringSubstr(EnumToString(_Period), 7) +
              "  spread " + IntegerToString((int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD)) + " pts" +
              (g_statusMsg != "" ? "   [" + g_statusMsg + "]" : "");
@@ -1527,6 +1644,11 @@ void PanelRender()
    rc[n] = clrSilver; n++;
    rows[n] = g_dynNote;
    rc[n]  = (g_dynOK ? clrDeepSkyBlue : clrGray); n++;
+   rows[n] = "context: CHOP " + DoubleToString(g_chop1, 1) +
+             (g_chop1 >= InpChopChoppy ? " (choppy/range)" :
+              (g_chop1 <= InpChopTrend ? " (trending)" : " (transition)")) +
+             "  |  squeeze " + g_squeezeState;
+   rc[n]  = (g_chop1 >= InpChopChoppy ? clrGold : (g_chop1 <= InpChopTrend ? clrLime : clrSilver)); n++;
 
    //--- candle read ------------------------------------------------------
    rows[n] = "LAST CLOSED CANDLE"; rc[n] = clrGold; n++;
