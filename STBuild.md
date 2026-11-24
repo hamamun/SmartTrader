@@ -23,6 +23,11 @@ Rule: no step is built until the user approves it here. Each step = few words, n
   sessions and behavior.
 - **F5. Auto-parameters per symbol type:** all internal parameters are defined
   automatically from the symbol type profile — expert-tuned, no user tuning.
+  Rule: every parameter value must come from (a) market convention, (b) the
+  symbol-type statistics, or (c) evidence from the Step 5 history exam —
+  never arbitrary. Indicator periods themselves (EMA 20/50, ATR 14, CHOP
+  61.8/38.2) stay standard/universal; the type profiles vary the calibrations
+  and weights around them, not the tools.
 
 ---
 
