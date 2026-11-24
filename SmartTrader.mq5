@@ -17,7 +17,7 @@
 //+------------------------------------------------------------------+
 #property copyright   "SmartTrader"
 #property link        "https://github.com/hamamun/SmartTrader"
-#property version     "1.20"
+#property version     "1.30"
 #property description "SmartTrader Phase 1 - Market Watch & Forecast."
 #property description "Reads candles and trend like a human; validation thresholds self-adapt"
 #property description "to each symbol and the current market context (dynamic percentiles)."
@@ -25,69 +25,35 @@
 #property description "Observation only: this version never sends an order."
 
 //====================================================================//
-//  INPUTS                                                            //
+//  INPUTS - only what a trader actually chooses                      //
 //====================================================================//
+//  Every technical calibration (indicator periods, levels, percentiles,
+//  ATR multipliers) is self-adapting or tuned inside the EA. A trader
+//  concentrates on trading, not on settings.
 
-input group "=== A. Chart / basic rules ==="
-input ENUM_BASE_CORNER InpPanelCorner      = CORNER_LEFT_UPPER; // Panel corner
-input int              InpFontSize         = 9;                 // Panel font size
-input int              InpSignalExpiryBars = 0;                 // Signal valid for N bars (0 = auto: M5 12 / M15 8)
-input bool             InpAlertPopup       = true;              // Popup alert on validated signal
-input bool             InpAlertPush        = false;             // Push notification on validated signal
-input bool             InpAlertEmail       = false;             // E-mail on validated signal
-input bool             InpAlertWatch       = false;             // Also alert on weak (watchlist) signals
+enum ENUM_ST_STYLE
+  {
+   ST_CONSERVATIVE = 0,   // Conservative - fewer, high-conviction signals
+   ST_BALANCED     = 1,   // Balanced (recommended)
+   ST_AGGRESSIVE   = 2    // Aggressive - more signals, tighter stops
+  };
 
-input group "=== B. Trend engine ==="
-input int              InpFastEMA          = 20;                // Fast EMA period
-input int              InpSlowEMA          = 50;                // Slow EMA period
-input int              InpADXPeriod        = 14;                // ADX period
-input double           InpADXStrong        = 25.0;              // ADX >= this -> strong trend
-input double           InpADXTrendMin      = 20.0;              // ADX >= this -> trend (else range)
-input int              InpSwingLookback    = 60;                // Bars to scan for swing highs/lows
+input group "=== Trading style ==="
+input ENUM_ST_STYLE InpStyle = ST_BALANCED;   // How SmartTrader should judge the market
 
-input group "=== C. Validation indicators ==="
-input int              InpRSIPeriod        = 14;                // RSI period
-input double           InpRSIBuyMax        = 35.0;              // RSI oversold limit (buy reversal, static fallback)
-input double           InpRSISellMin       = 65.0;              // RSI overbought limit (sell reversal, static fallback)
-input int              InpBBPeriod         = 20;                // Bollinger period
-input double           InpBBDev            = 2.0;               // Bollinger deviation
-input int              InpATRPeriod        = 14;                // ATR period
-input int              InpVolAvgBars       = 20;                // Volume average bars
-input double           InpVolSpikeMult     = 1.3;               // Volume spike multiplier (static fallback)
-input double           InpLocATRFrac       = 0.5;               // Location: within 0.5 x ATR of swing
+input group "=== Alerts ==="
+input bool InpAlertPopup = true;              // Popup alert on validated signal
+input bool InpAlertPush  = false;             // Push notification (phone)
+input bool InpAlertEmail = false;             // E-mail alert
+input bool InpAlertWatch = false;             // Also alert on watchlist signals
 
-input group "=== C2. Dynamic (smart) thresholds ==="
-input bool             InpDynamic          = true;              // Adapt thresholds to symbol & market context
-input int              InpDynLookback      = 300;               // Bars used to learn the symbol's normal behavior
-input double           InpDynRSIPctLow     = 15.0;              // RSI oversold = this percentile of its own history
-input double           InpDynRSIPctHigh    = 85.0;              // RSI overbought percentile
-input double           InpDynADXPctTrend   = 60.0;              // ADX percentile separating trend from range
-input double           InpDynADXPctStrong  = 75.0;              // ADX percentile counting as "strong trend"
-input double           InpDynVolPct        = 70.0;              // Volume percentile counting as real interest
-input double           InpDynATRExpand     = 1.30;              // ATR now / median above this = expanding volatility
-input double           InpDynATRShrink     = 0.75;              // below this = contracting volatility
+input group "=== Panel ==="
+input ENUM_BASE_CORNER InpPanelCorner = CORNER_LEFT_UPPER;  // Panel corner
+input int              InpFontSize    = 9;                  // Panel font size
 
-input group "=== C3. Modern indicator engine ==="
-input double           InpQQEFactor        = 4.236;             // QQE trailing factor (golden ratio squared)
-input int              InpFisherLen        = 9;                 // Ehlers Fisher Transform lookback
-input int              InpChopPeriod       = 14;                // Choppiness Index period
-input double           InpChopChoppy       = 61.8;              // CHOP >= this = choppy/range regime
-input double           InpChopTrend        = 38.2;              // CHOP <= this = trending regime
-
-input group "=== D. Signal scoring ==="
-input int              InpMinScoreValid    = 4;                 // Score needed for VALIDATED signal (max 7)
-input int              InpMinScoreWatch    = 3;                 // Score needed for watchlist
-input int              InpStrongTrendExtra = 1;                 // Extra score needed against a STRONG trend
-
-input group "=== E. Forecast levels ==="
-input double           InpSLATRBuf         = 0.3;               // SL buffer beyond structure (x ATR)
-input double           InpSLMaxATR         = 2.5;               // Max SL distance (x ATR)
-input double           InpTP1ATR           = 1.0;               // TP1 distance (x ATR)
-input double           InpTP2ATR           = 2.0;               // TP2 distance (x ATR)
-input int              InpSpeedBars        = 50;                // Bars used to estimate market speed
-
-input group "=== F. Past-history quick check ==="
-input int              InpHistoryBars      = 500;               // Bars scanned for the same setup
+input group "=== Advanced (leave as is if unsure) ==="
+input bool InpDynamic          = true;        // Self-adapting thresholds (recommended)
+input int  InpSignalExpiryBars = 0;           // Signal valid for N bars (0 = auto)
 
 //====================================================================//
 //  CONSTANTS / TYPES                                                 //
@@ -96,6 +62,42 @@ input int              InpHistoryBars      = 500;               // Bars scanned 
 #define OBJ_PREFIX     "ST_"
 #define MAX_ROWS       30
 #define MAX_RECENT     5
+
+//--- engine tuning (internal: self-adapting, deliberately not user inputs)
+#define EMA_FAST          20     // fast EMA
+#define EMA_SLOW          50     // slow EMA
+#define ADX_PERIOD        14
+#define RSI_PERIOD        14
+#define BB_PERIOD         20     // Bollinger period
+#define BB_DEV            2.0    // Bollinger deviation
+#define ATR_PERIOD        14
+#define VOL_AVG_BARS      20
+#define SWING_LOOKBACK    60
+#define SPEED_BARS        50     // bars used to estimate market speed
+#define FISHER_LEN        9      // Ehlers Fisher lookback
+#define CHOP_PERIOD       14     // Choppiness Index period
+#define CHOP_CHOPPY       61.8   // CHOP >= this -> choppy/range regime
+#define CHOP_TREND        38.2   // CHOP <= this -> trending regime
+#define QQE_FACTOR        4.236  // QQE trailing factor (phi squared)
+#define HISTORY_BARS      500    // past-history replay depth
+
+//--- static fallback limits (used only until the dynamic layer has learned)
+#define RSI_FALL_LO       35.0
+#define RSI_FALL_HI       65.0
+#define ADX_FALL_TREND    20.0
+#define ADX_FALL_STRONG   25.0
+#define VOL_FALL_MULT     1.3
+#define LOC_ATR_FRAC      0.5    // location tolerance around a swing
+
+//--- dynamic-learning calibration
+#define DYN_LOOKBACK      300    // bars used to learn the symbol's behavior
+#define DYN_RSI_PCT_LO    15.0   // RSI oversold percentile
+#define DYN_RSI_PCT_HI    85.0   // RSI overbought percentile
+#define DYN_ADX_PCT_TREND 60.0   // ADX percentile for "trending"
+#define DYN_ADX_PCT_STRONG 75.0  // ADX percentile for "strong trend"
+#define DYN_VOL_PCT       70.0   // volume "real interest" percentile
+#define DYN_ATR_EXPAND    1.30   // ATR vs median: expanding
+#define DYN_ATR_SHRINK    0.75   // ATR vs median: contracting
 
 // pattern classes
 #define PC_NONE            0
@@ -256,6 +258,15 @@ int       g_histKeyT  = -1;
 datetime  g_lastBar   = 0;
 string    g_statusMsg = "loading history...";
 
+//--- style-driven behaviour (set once in OnInit, per trading style)
+int      g_minScoreValid = 4;
+int      g_minScoreWatch = 3;
+int      g_strongExtra   = 1;
+double   g_slBufATR      = 0.3;
+double   g_slMaxATR      = 2.5;
+double   g_tp1ATR        = 1.0;
+double   g_tp2ATR        = 2.0;
+
 //--- dynamic context: thresholds re-learned from THIS symbol every closed bar
 bool     g_dynOK        = false;
 double   g_rsiLoEff     = 35.0;   // effective limits actually used by validation
@@ -282,6 +293,35 @@ string   g_squeezeState  = "off";
 //  INIT / DEINIT                                                     //
 //====================================================================//
 
+string StyleName()
+  {
+   if(InpStyle == ST_CONSERVATIVE) return("Conservative");
+   if(InpStyle == ST_AGGRESSIVE)   return("Aggressive");
+   return("Balanced");
+  }
+
+// one human choice -> coherent parameter set (strictness + stop/target profile)
+void ApplyStyle()
+  {
+   switch(InpStyle)
+     {
+      case ST_CONSERVATIVE:
+         g_minScoreValid = 5; g_minScoreWatch = 4; g_strongExtra = 1;
+         g_slBufATR = 0.40; g_slMaxATR = 3.0;
+         g_tp1ATR = 1.1; g_tp2ATR = 2.2;
+         break;
+      case ST_AGGRESSIVE:
+         g_minScoreValid = 3; g_minScoreWatch = 3; g_strongExtra = 1;
+         g_slBufATR = 0.25; g_slMaxATR = 2.0;
+         g_tp1ATR = 1.0; g_tp2ATR = 2.0;
+         break;
+      default:                        // balanced
+         g_minScoreValid = 4; g_minScoreWatch = 3; g_strongExtra = 1;
+         g_slBufATR = 0.30; g_slMaxATR = 2.5;
+         g_tp1ATR = 1.0; g_tp2ATR = 2.0;
+     }
+  }
+
 int OnInit()
   {
    if(_Period != PERIOD_M5 && _Period != PERIOD_M15)
@@ -291,12 +331,12 @@ int OnInit()
       return(INIT_FAILED);
      }
 
-   hEmaFast = iMA(_Symbol, _Period, InpFastEMA, 0, MODE_EMA, PRICE_CLOSE);
-   hEmaSlow = iMA(_Symbol, _Period, InpSlowEMA, 0, MODE_EMA, PRICE_CLOSE);
-   hRSI     = iRSI(_Symbol, _Period, InpRSIPeriod, PRICE_CLOSE);
-   hATR     = iATR(_Symbol, _Period, InpATRPeriod);
-   hADX     = iADX(_Symbol, _Period, InpADXPeriod);
-   hBands   = iBands(_Symbol, _Period, InpBBPeriod, 0, InpBBDev, PRICE_CLOSE);
+   hEmaFast = iMA(_Symbol, _Period, EMA_FAST, 0, MODE_EMA, PRICE_CLOSE);
+   hEmaSlow = iMA(_Symbol, _Period, EMA_SLOW, 0, MODE_EMA, PRICE_CLOSE);
+   hRSI     = iRSI(_Symbol, _Period, RSI_PERIOD, PRICE_CLOSE);
+   hATR     = iATR(_Symbol, _Period, ATR_PERIOD);
+   hADX     = iADX(_Symbol, _Period, ADX_PERIOD);
+   hBands   = iBands(_Symbol, _Period, BB_PERIOD, 0, BB_DEV, PRICE_CLOSE);
 
    if(hEmaFast==INVALID_HANDLE || hEmaSlow==INVALID_HANDLE || hRSI==INVALID_HANDLE ||
       hATR==INVALID_HANDLE     || hADX==INVALID_HANDLE     || hBands==INVALID_HANDLE)
@@ -305,14 +345,17 @@ int OnInit()
       return(INIT_FAILED);
      }
 
+   ApplyStyle();
+
    ResetForecast(g_fc);
    ResetForecast(g_lastDone);
    for(int i=0; i<MAX_RECENT; i++) g_recent[i]="";
 
    EventSetTimer(1);
-   Print("SmartTrader v1.20 Phase 1 started on ", _Symbol, " ", EnumToString(_Period),
-         " - market watch & forecast only, no orders will be placed.",
-         (InpDynamic ? " Dynamic thresholds: ON." : " Dynamic thresholds: OFF (static inputs)."));
+   Print("SmartTrader v1.30 Phase 1 started on ", _Symbol, " ", EnumToString(_Period),
+         " | style: ", StyleName(),
+         " | dynamic thresholds: ", (InpDynamic ? "ON" : "OFF"),
+         " - market watch & forecast only, no orders will be placed.");
 
    PanelRender();
    return(INIT_SUCCEEDED);
@@ -386,7 +429,7 @@ void UpdateData()
       return;
      }
 
-   int want = MathMax(300, MathMin(InpHistoryBars + 10, available - 3));
+   int want = MathMax(300, MathMin(HISTORY_BARS + 10, available - 3));
    if(want < 100)
       return;
 
@@ -454,8 +497,8 @@ void ComputeModernIndicators()
       double rsim  = (a == 0 ? g_rsi[s] : rsimPrev + alpha * (g_rsi[s] - rsimPrev));
       double d     = (a == 0 ? 0 : MathAbs(rsim - rsimPrev));
       double dar   = (a == 0 ? d : darPrev + (d - darPrev) / 14.0);   // Wilder(14)
-      double longB  = rsim - InpQQEFactor * dar;
-      double shortB = rsim + InpQQEFactor * dar;
+      double longB  = rsim - QQE_FACTOR * dar;
+      double shortB = rsim + QQE_FACTOR * dar;
       int tr = trendPrev;
       if(a > 0)
         {
@@ -479,7 +522,7 @@ void ComputeModernIndicators()
    for(int a = 0; a < n; a++)
      {
       int s = n - 1 - a;
-      int len = MathMin(InpFisherLen, s + 1);
+      int len = MathMin(FISHER_LEN, s + 1);
       double hh = -DBL_MAX, ll = DBL_MAX;
       for(int k = 0; k < len; k++)
         {
@@ -498,7 +541,7 @@ void ComputeModernIndicators()
      }
 
    //--- Choppiness Index on the last closed bar
-   int per = MathMin(InpChopPeriod, g_window - 2);
+   int per = MathMin(CHOP_PERIOD, g_window - 2);
    double chH = HighestHigh(1, per), chL = LowestLow(1, per);
    double sumA = 0;
    for(int k = 1; k <= per; k++) sumA += g_atr[k];
@@ -541,12 +584,12 @@ void ComputeModernIndicators()
 void UpdateDynamicContext()
   {
    // defaults = static inputs (fallback when dynamic mode off / not enough data)
-   g_rsiLoEff     = InpRSIBuyMax;
-   g_rsiHiEff     = InpRSISellMin;
+   g_rsiLoEff     = RSI_FALL_LO;
+   g_rsiHiEff     = RSI_FALL_HI;
    g_rsiMidEff    = 50.0;
-   g_adxTrendEff  = InpADXTrendMin;
-   g_adxStrongEff = InpADXStrong;
-   g_volMultEff   = InpVolSpikeMult;
+   g_adxTrendEff  = ADX_FALL_TREND;
+   g_adxStrongEff = ADX_FALL_STRONG;
+   g_volMultEff   = VOL_FALL_MULT;
    g_atrRatio     = 1.0;
    g_volRegime    = 0;
    g_dynOK        = false;
@@ -555,11 +598,11 @@ void UpdateDynamicContext()
    if(!InpDynamic)
       return;
 
-   int n = MathMin(InpDynLookback, g_window - 3);
+   int n = MathMin(DYN_LOOKBACK, g_window - 3);
    if(n < 100)
      {
       g_dynNote = "dynamic: learning needs more history (" + IntegerToString(n) + "/" +
-                  IntegerToString(InpDynLookback) + " bars) - using static limits";
+                  IntegerToString(DYN_LOOKBACK) + " bars) - using static limits";
       return;
      }
 
@@ -568,33 +611,33 @@ void UpdateDynamicContext()
 
    //--- RSI zones from the symbol's own RSI distribution
    for(int i = 0; i < n; i++) tmp[i] = g_rsi[1 + i];
-   g_rsiLoEff  = PercentileOf(tmp, n, InpDynRSIPctLow);
-   g_rsiHiEff  = PercentileOf(tmp, n, InpDynRSIPctHigh);
+   g_rsiLoEff  = PercentileOf(tmp, n, DYN_RSI_PCT_LO);
+   g_rsiHiEff  = PercentileOf(tmp, n, DYN_RSI_PCT_HI);
    g_rsiMidEff = PercentileOf(tmp, n, 50.0);
 
    //--- ADX trend / strong levels
    for(int i = 0; i < n; i++) tmp[i] = g_adx[1 + i];
-   g_adxTrendEff  = PercentileOf(tmp, n, InpDynADXPctTrend);
-   g_adxStrongEff = PercentileOf(tmp, n, InpDynADXPctStrong);
+   g_adxTrendEff  = PercentileOf(tmp, n, DYN_ADX_PCT_TREND);
+   g_adxStrongEff = PercentileOf(tmp, n, DYN_ADX_PCT_STRONG);
 
    //--- volume: percentile of "volume vs its own 20-bar average" ratios
    double rat[];
    ArrayResize(rat, n);
    for(int i = 0; i < n; i++)
      {
-      double a = AvgVol(InpVolAvgBars, 2 + i);
+      double a = AvgVol(VOL_AVG_BARS, 2 + i);
       rat[i] = (a > 0 ? (double)g_vol[1 + i] / a : 0);
      }
-   double pv = PercentileOf(rat, n, InpDynVolPct);
-   g_volMultEff = (pv > 0 ? pv : InpVolSpikeMult);
+   double pv = PercentileOf(rat, n, DYN_VOL_PCT);
+   g_volMultEff = (pv > 0 ? pv : VOL_FALL_MULT);
 
    //--- volatility regime: current ATR vs its own median
    for(int i = 0; i < n; i++) tmp[i] = g_atr[1 + i];
    double medAtr = PercentileOf(tmp, n, 50.0);
    if(medAtr > 0)
       g_atrRatio = g_atr[1] / medAtr;
-   if(g_atrRatio >= InpDynATRExpand)      g_volRegime =  1;
-   else if(g_atrRatio <= InpDynATRShrink) g_volRegime = -1;
+   if(g_atrRatio >= DYN_ATR_EXPAND)      g_volRegime =  1;
+   else if(g_atrRatio <= DYN_ATR_SHRINK) g_volRegime = -1;
 
    g_dynOK = true;
    g_dynNote = StringFormat("thresholds: DYNAMIC  RSI %.1f/%.1f  ADX %.0f/%.0f  Vol >= %.2fx  ATR %.2fx med",
@@ -835,7 +878,7 @@ void TrendAt(int s, STrend &t, SSwings &sw)
    t.mdi   = g_mdi[s];
    double c = g_rates[s].close;
 
-   FindSwings(s, InpSwingLookback, sw);
+   FindSwings(s, SWING_LOOKBACK, sw);
 
    t.swingDir = 0;
    if(sw.hasH2 && sw.hasL2)
@@ -857,8 +900,8 @@ void TrendAt(int s, STrend &t, SSwings &sw)
    else if(t.adx >= g_adxStrongEff)           t.state = TR_DOWN_STRONG;
    else                                       t.state = TR_DOWN;
 
-   t.note = "EMA" + IntegerToString(InpFastEMA) + (t.ema20 > t.ema50 ? ">" : (t.ema20 < t.ema50 ? "<" : "=")) +
-            "EMA" + IntegerToString(InpSlowEMA) +
+   t.note = "EMA" + IntegerToString(EMA_FAST) + (t.ema20 > t.ema50 ? ">" : (t.ema20 < t.ema50 ? "<" : "=")) +
+            "EMA" + IntegerToString(EMA_SLOW) +
             ", structure " + (t.swingDir > 0 ? "HH+HL" : (t.swingDir < 0 ? "LH+LL" : "mixed")) +
             (t.adx >= g_adxTrendEff ? ", trending" : ", weak/range");
   }
@@ -997,7 +1040,7 @@ void ValidateSetup(const SPattern &pat, const STrend &tr, const SSwings &sw,
    AddCheck(ck, n, "Fisher", okF ? CK_PASS : CK_FAIL, detF);
 
    //--- 5. Volume spike ---------------------------------------------------
-   double vAvg = AvgVol(InpVolAvgBars, 2);
+   double vAvg = AvgVol(VOL_AVG_BARS, 2);
    bool okV = false; string detV;
    if(vAvg > 0)
      {
@@ -1035,7 +1078,7 @@ void ValidateSetup(const SPattern &pat, const STrend &tr, const SSwings &sw,
    //--- 7. Location / ADX -------------------------------------------------
    if(reversal)
      {
-      double locDist = InpLocATRFrac * atr;
+      double locDist = LOC_ATR_FRAC * atr;
       bool okL = false; string detL;
       if(d > 0)
         {
@@ -1090,16 +1133,16 @@ void AnalyzeLastBar()
 
    ValidateSetup(g_lastPat, g_trend, g_swings, g_checks, g_checkCount, g_score, g_maxScore, g_setupType);
 
-   int need = InpMinScoreValid;
+   int need = g_minScoreValid;
    bool againstStrong = (g_setupType == SETUP_REVERSAL &&
                          (g_trend.state == TR_UP_STRONG || g_trend.state == TR_DOWN_STRONG));
    if(againstStrong)
-      need += InpStrongTrendExtra;
+      need += g_strongExtra;
 
    // market-context rule: in a choppy regime momentum breakouts usually fail,
    // UNLESS a volatility squeeze just fired (compression released with force)
    bool chopBreakout = (g_setupType == SETUP_CONTINUATION &&
-                        g_chop1 >= InpChopChoppy && !g_squeezeFired);
+                        g_chop1 >= CHOP_CHOPPY && !g_squeezeFired);
    if(chopBreakout)
       need += 1;
 
@@ -1109,14 +1152,14 @@ void AnalyzeLastBar()
       if(againstStrong)    g_decisionNote = "against strong trend - extra confirmation was required";
       else if(chopBreakout) g_decisionNote = "choppy market - breakout needed extra confirmation";
      }
-   else if(g_score >= InpMinScoreWatch)
+   else if(g_score >= g_minScoreWatch)
      {
       g_decision = DEC_WATCH;
       if(againstStrong)    g_decisionNote = "would need " + IntegerToString(need) + "/7 against a strong trend";
       else if(chopBreakout) g_decisionNote = "would need " + IntegerToString(need) + "/7 in a choppy market";
      }
    else
-      g_decisionNote = "score below watchlist threshold (" + IntegerToString(InpMinScoreWatch) + ")";
+      g_decisionNote = "score below watchlist threshold (" + IntegerToString(g_minScoreWatch) + ")";
 
    if(g_decision == DEC_VALID)
       StartForecast();
@@ -1165,14 +1208,14 @@ int EffectiveExpiryBars(int expBarsEstimate)
 double SwingLowNear(int s)
   {
    SSwings sw;
-   FindSwings(s, InpSwingLookback, sw);
+   FindSwings(s, SWING_LOOKBACK, sw);
    return(sw.hasL ? sw.sl1 : 0);
   }
 
 double SwingHighNear(int s)
   {
    SSwings sw;
-   FindSwings(s, InpSwingLookback, sw);
+   FindSwings(s, SWING_LOOKBACK, sw);
    return(sw.hasH ? sw.sh1 : 0);
   }
 
@@ -1186,16 +1229,16 @@ double CalcSL(int s, int d)
      {
       double swLo = SwingLowNear(s);
       base = (swLo > 0 ? MathMin(g_rates[s].low, swLo) : g_rates[s].low);
-      double sl = base - InpSLATRBuf * atr;
-      if(g_rates[s].close - sl > InpSLMaxATR * atr)          // keep stop human-sane
-         sl = g_rates[s].low - InpSLATRBuf * atr;
+      double sl = base - g_slBufATR * atr;
+      if(g_rates[s].close - sl > g_slMaxATR * atr)          // keep stop human-sane
+         sl = g_rates[s].low - g_slBufATR * atr;
       return(sl);
      }
    double swHi = SwingHighNear(s);
    base = (swHi > 0 ? MathMax(g_rates[s].high, swHi) : g_rates[s].high);
-   double sl = base + InpSLATRBuf * atr;
-   if(sl - g_rates[s].close > InpSLMaxATR * atr)
-      sl = g_rates[s].high + InpSLATRBuf * atr;
+   double sl = base + g_slBufATR * atr;
+   if(sl - g_rates[s].close > g_slMaxATR * atr)
+      sl = g_rates[s].high + g_slBufATR * atr;
    return(sl);
   }
 
@@ -1224,10 +1267,10 @@ void StartForecast()
    double sl = CalcSL(1, d);
    if(atr <= 0 || sl <= 0 || entry <= 0)
       return;
-   double tp1 = (d > 0 ? entry + InpTP1ATR * atr : entry - InpTP1ATR * atr);
-   double tp2 = (d > 0 ? entry + InpTP2ATR * atr : entry - InpTP2ATR * atr);
+   double tp1 = (d > 0 ? entry + g_tp1ATR * atr : entry - g_tp1ATR * atr);
+   double tp2 = (d > 0 ? entry + g_tp2ATR * atr : entry - g_tp2ATR * atr);
 
-   double speed = AvgSpeed(InpSpeedBars, 1);
+   double speed = AvgSpeed(SPEED_BARS, 1);
    if(speed <= 0) speed = atr * 0.3;
    int expBars = (int)MathCeil(MathAbs(tp1 - entry) / speed);
 
@@ -1349,11 +1392,11 @@ void HistoryScanIfNeeded()
 void UpdateHistNote(double w, double t)
   {
    if(t < 1)
-      g_histNote = "past " + IntegerToString(InpHistoryBars) + " bars: no comparable setups";
+      g_histNote = "past " + IntegerToString(HISTORY_BARS) + " bars: no comparable setups";
    else
      {
       double rate = 100.0 * w / t;
-      g_histNote = "past " + IntegerToString(InpHistoryBars) + " bars: " +
+      g_histNote = "past " + IntegerToString(HISTORY_BARS) + " bars: " +
                    DoubleToString(w, 0) + "/" + DoubleToString(t, 0) +
                    " (" + DoubleToString(rate, 0) + "%) reached TP1 first";
      }
@@ -1368,7 +1411,7 @@ void HistoryScanFor(int code, int dir, int setupType, double &wins, double &tota
    wins = 0; total = 0;
 
    int maxExp = 3 * AutoExpiryBars();   // upper bound of the adaptive expiry
-   int start  = MathMin(InpHistoryBars, g_window - maxExp - 3);
+   int start  = MathMin(HISTORY_BARS, g_window - maxExp - 3);
 
    for(int s = start; s >= 3; s--)
      {
@@ -1388,12 +1431,12 @@ void HistoryScanFor(int code, int dir, int setupType, double &wins, double &tota
          continue;
       double entry = g_rates[s].close;
       double sl    = CalcSL(s, dir);
-      double tp1   = (dir > 0 ? entry + InpTP1ATR * atr : entry - InpTP1ATR * atr);
+      double tp1   = (dir > 0 ? entry + g_tp1ATR * atr : entry - g_tp1ATR * atr);
       if(sl <= 0)
          continue;
 
       // per-signal adaptive expiry, same formula as the live forecast
-      double speedH = AvgSpeed(InpSpeedBars, s);
+      double speedH = AvgSpeed(SPEED_BARS, s);
       int    expH   = EffectiveExpiryBars(speedH > 0 ? (int)MathCeil(MathAbs(tp1 - entry) / speedH) : 0);
 
       bool resolved  = false;
@@ -1611,7 +1654,7 @@ void PanelRender()
    int n = 0;
 
    //--- header ---------------------------------------------------------
-   rows[n] = "SmartTrader v1.2 - Phase 1: Market Watch & Forecast"; rc[n] = clrGold;      n++;
+   rows[n] = "SmartTrader v1.3 - Phase 1: Market Watch & Forecast  |  style: " + StyleName(); rc[n] = clrGold;      n++;
    rows[n] = _Symbol + "  " + StringSubstr(EnumToString(_Period), 7) +
              "  spread " + IntegerToString((int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD)) + " pts" +
              (g_statusMsg != "" ? "   [" + g_statusMsg + "]" : "");
@@ -1636,7 +1679,7 @@ void PanelRender()
    rc[n] = clrSilver; n++;
    double atr1 = g_atr[1];
    double spd  = AvgSpeed(50, 1);
-   rows[n] = "ATR(" + IntegerToString(InpATRPeriod) + ") " +
+   rows[n] = "ATR(" + IntegerToString(ATR_PERIOD) + ") " +
              DoubleToString(atr1 / _Point, 0) + " pts  |  avg speed " +
              DoubleToString(spd / _Point, 1) + " pts/bar" +
              (g_dynOK ? (g_volRegime > 0 ? "  |  volatility: EXPANDING" :
@@ -1645,10 +1688,10 @@ void PanelRender()
    rows[n] = g_dynNote;
    rc[n]  = (g_dynOK ? clrDeepSkyBlue : clrGray); n++;
    rows[n] = "context: CHOP " + DoubleToString(g_chop1, 1) +
-             (g_chop1 >= InpChopChoppy ? " (choppy/range)" :
-              (g_chop1 <= InpChopTrend ? " (trending)" : " (transition)")) +
+             (g_chop1 >= CHOP_CHOPPY ? " (choppy/range)" :
+              (g_chop1 <= CHOP_TREND ? " (trending)" : " (transition)")) +
              "  |  squeeze " + g_squeezeState;
-   rc[n]  = (g_chop1 >= InpChopChoppy ? clrGold : (g_chop1 <= InpChopTrend ? clrLime : clrSilver)); n++;
+   rc[n]  = (g_chop1 >= CHOP_CHOPPY ? clrGold : (g_chop1 <= CHOP_TREND ? clrLime : clrSilver)); n++;
 
    //--- candle read ------------------------------------------------------
    rows[n] = "LAST CLOSED CANDLE"; rc[n] = clrGold; n++;

@@ -91,8 +91,9 @@ Defaults: **score ≥ 4 → VALIDATED** (forecast + alert), **3 → WATCHLIST**,
 
 Continuation setups swap the last check for **ADX ≥ its dynamic trend level**.
 
-All thresholds are EA inputs — and in dynamic mode the EA re-learns them from the
-symbol's own history (see §4.1).
+All thresholds are self-adapting (the dynamic layer re-learns them from the symbol's
+own history, §4.1) — nothing for the trader to calibrate. The trading style (§6.1)
+sets the overall strictness.
 
 ### 4.2 Modern engine — what replaced the classics and why
 
@@ -163,18 +164,29 @@ is going — the same feedback a trader gets from watching their own calls.
 
 ---
 
-## 6. EA inputs (summary)
+## 6. EA inputs — only 4 groups, only what a trader chooses
 
-| Group | Inputs |
-|---|---|
-| Chart/basic | panel corner, font size, expiry bars (0 = auto), popup/push/e-mail alerts |
-| Trend engine | EMA 20/50, ADX 14 (strong ≥ 25, trend ≥ 20), swing lookback 60 |
-| Validation | RSI 14, BB 20/2.0, ATR 14, volume 20 bars, location 0.5×ATR (static fallbacks only — dynamic mode overrides) |
-| **Dynamic thresholds** | master switch (ON), learning lookback 300 bars, RSI percentiles 15/85, ADX percentiles 60/75, volume percentile 70, ATR regime 1.30/0.75 |
-| **Modern engine** | QQE factor 4.236, Fisher lookback 9, Choppiness 14 (choppy ≥ 61.8, trending ≤ 38.2) |
-| Scoring | validated ≥ 4, watchlist ≥ 3, +1 extra requirement against a strong trend, +1 for breakouts in a choppy regime (unless a squeeze just fired) |
-| Forecast | SL buffer 0.3×ATR (max 2.5×ATR), TP1 1.0×ATR, TP2 2.0×ATR, speed window 50 bars |
-| History check | 500 bars replay |
+SmartTrader follows a simple product rule: **a trader trades, the machine tunes itself.**
+Every indicator period, level, percentile and ATR multiplier is self-adapting (learned
+from the symbol) or internally tuned. The input window shows only:
+
+| Group | Inputs | Meaning |
+|---|---|---|
+| **Trading style** | Conservative / **Balanced** / Aggressive | the ONE real choice — how strict the judge is and the stop/target profile (see 6.1) |
+| **Alerts** | popup (ON), push (OFF), e-mail (OFF), watchlist alerts (OFF) | how you get notified |
+| **Panel** | corner, font size | appearance |
+| **Advanced** (leave as is) | adaptive thresholds ON, signal validity override 0 = auto | escape hatches for power users |
+
+### 6.1 What the trading style changes
+
+| Profile | Validated signal needs | Watchlist | Stop loss | Targets |
+|---|---|---|---|---|
+| Conservative | 5 of 7 | 4 | wider: 0.4×ATR buffer, max 3×ATR | TP1 1.1×ATR, TP2 2.2×ATR |
+| **Balanced** (default) | 4 of 7 | 3 | 0.3×ATR buffer, max 2.5×ATR | TP1 1.0×ATR, TP2 2.0×ATR |
+| Aggressive | 3 of 7 | 3 | tighter: 0.25×ATR buffer, max 2×ATR | TP1 1.0×ATR, TP2 2.0×ATR |
+
+The style also applies to the past-history replay, so the shown win-rate always
+matches the way you chose to trade. The panel header shows the active style.
 
 ---
 
