@@ -5,6 +5,27 @@ Rule: no step is built until the user approves it here. Each step = few words, n
 
 ---
 
+## FUNDAMENTALS (fixed by user — every step must respect these)
+
+- **F1. Timeframe guard:** M5 / M15 only. Any other chart → message
+  "out of range — return to M5/M15", EA does not run.
+- **F2. One instance, two horizons:** attached to either M5 or M15, the EA
+  computes and forecasts BOTH timeframes (its own chart TF + the other one).
+  Two independent reads, each on its own nature.
+- **F3. Market state first — before anything:** on every check the EA determines
+  OPEN / CLOSED / HOLD (broker maintenance, trade disabled).
+  - OPEN → full forecast work
+  - CLOSED → "market closed — opens <day date time> MT5 server time" (server
+    time shown, never local PC time); no forecasting
+  - HOLD (session break / trade disabled) → shown, no forecasting
+- **F4. Symbol type classification:** currency (forex), metals (gold/silver),
+  energy (oil), indices, crypto, etc. Each type has different trade statistics,
+  sessions and behavior.
+- **F5. Auto-parameters per symbol type:** all internal parameters are defined
+  automatically from the symbol type profile — expert-tuned, no user tuning.
+
+---
+
 ## Ground rules (agreed)
 
 - Target: an automated bot that trades on behalf of the user — maximum
@@ -18,6 +39,7 @@ Rule: no step is built until the user approves it here. Each step = few words, n
 ## Build steps tracker
 
 - [x] Step 1 — Trend definition (approved)
+- [x] Fundamentals F1–F5 (approved)
 - [ ] Step 2 — Reversal candle worth watching (proposal next)
 - [ ] Step 3 — Signal validation checklist (few tools, few checks)
 - [ ] Step 4 — Forecast: entry / SL / TP / horizon (natural targets)
