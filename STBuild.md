@@ -45,7 +45,7 @@ Rule: no step is built until the user approves it here. Each step = few words, n
 
 - [x] Step 1 — Trend definition (approved)
 - [x] Fundamentals F1–F5 (approved)
-- [x] Step 2 — The map of levels (approved)
+- [x] Step 2 — The precision map (approved, final)
 - [ ] Step 3 — Candle setups at locations (proposal next)
 - [ ] Step 4 — Signal validation checklist (few tools, few checks)
 - [ ] Step 5 — Forecast: entry / SL / TP / horizon (natural targets)
