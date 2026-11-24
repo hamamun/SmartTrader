@@ -45,13 +45,30 @@ Rule: no step is built until the user approves it here. Each step = few words, n
 
 - [x] Step 1 — Trend definition (approved)
 - [x] Fundamentals F1–F5 (approved)
-- [ ] Step 2 — Reversal candle worth watching (proposal next)
-- [ ] Step 3 — Signal validation checklist (few tools, few checks)
-- [ ] Step 4 — Forecast: entry / SL / TP / horizon (natural targets)
-- [ ] Step 5 — History exam (replay approved rules, honest stats)
-- [ ] Step 6 — Proof stage (true vs false reversal before acting)
-- [ ] Step 7 — Demo forward test (scoreboard)
-- [ ] Step 8 — Autotrading (Phase 2: risk lots, order management, overridable rails)
+- [x] Step 2 — The map of levels (approved)
+- [ ] Step 3 — Candle setups at locations (proposal next)
+- [ ] Step 4 — Signal validation checklist (few tools, few checks)
+- [ ] Step 5 — Forecast: entry / SL / TP / horizon (natural targets)
+- [ ] Step 6 — History exam (replay approved rules, honest stats)
+- [ ] Step 7 — Proof stage (true vs false reversal before acting)
+- [ ] Step 8 — Demo forward test (scoreboard)
+- [ ] Step 9 — Autotrading (Phase 2: risk lots, order management, overridable rails)
+
+---
+
+## Step 2 — THE MAP (approved)
+
+After trend, the trader draws the map; SmartTrader draws it in its own
+working area (panel table), NOT as chart lines.
+
+- **Levels (keep only strongest 3–6, ranked):** recent swing highs/lows,
+  trend lifeline (last HL in up-trend / LH in down-trend), session extremes
+  (day high/low; Asian range for forex), round numbers (grid per symbol type).
+- **Strength score** = touches × drama of the fight × recency; map refreshes
+  every closed bar (new fights add strength, old weak levels fade).
+- **Price location classified vs map:** at a level / between levels / at lifeline.
+- **Location is a PRIMARY GATE:** candles are only judged AT a location —
+  pattern without location = noise.
 
 ---
 
