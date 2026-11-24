@@ -3,21 +3,23 @@
 //|            SmartTrader - human-style market watch & forecast     |
 //|            Phase 1 : Observation only - NO orders are placed     |
 //+------------------------------------------------------------------+
-//| Works like a human trader sitting at the chart:                  |
-//|  1. Reads every closed M5/M15 candle (20+ candle patterns).      |
-//|  2. Reads the trend (EMA alignment, swing structure, ADX).       |
-//|  3. Finds reversal / continuation setups.                        |
-//|  4. Validates with a modern engine: QQE (smoothed RSI + adaptive |
-//|     trailing bands), Ehlers Fisher Transform, Choppiness Index,  |
-//|     TTM squeeze, adaptive RSI/ADX/volume percentiles.            |
-//|  5. Publishes a forecast: entry, SL, TP1, TP2, expected bars,    |
-//|     expiry ("signal validation time") and past-history win-rate. |
-//|  6. Tracks the live forecast until TP1 / SL / expiry.            |
+//| Works like a human trader sitting at the chart, in 3 stages:     |
+//|  1. DETECT  - reads every closed M5/M15 candle (20+ patterns),   |
+//|     the trend, and validates the setup with a modern engine      |
+//|     (QQE, Fisher, Choppiness, squeeze, adaptive percentiles).    |
+//|  2. PROVE  - a validated setup is only a CANDIDATE. Like a human |
+//|     doubting his reversal, it waits up to N bars for the market  |
+//|     to prove it: close beyond the pattern extreme = true, close  |
+//|     beyond the opposite extreme = FALSE reversal, else expired.  |
+//|  3. PROJECT - only a PROVEN idea gets a forward-horizon forecast:|
+//|     measured-move targets from the prior leg (floor 1R/2R),      |
+//|     expected bars to TP1 from net directional speed, a horizon   |
+//|     end time, and a live "on schedule / behind" progress check.  |
 //| Phase 2 (separate release) will place and manage the orders.     |
 //+------------------------------------------------------------------+
 #property copyright   "SmartTrader"
 #property link        "https://github.com/hamamun/SmartTrader"
-#property version     "1.40"
+#property version     "1.50"
 #property description "SmartTrader Phase 1 - Market Watch & Forecast."
 #property description "Reads candles and trend like a human; validation thresholds self-adapt"
 #property description "to each symbol and the current market context (dynamic percentiles)."
@@ -66,6 +68,13 @@ input int  InpSignalExpiryBars = 0;           // Signal valid for N bars (0 = au
 //--- forecast stability (human-like patience)
 #define FLIP_MIN_AGE   3        // min bars of an active forecast before an opposite flip may replace it
 #define COOLDOWN_BARS  2        // pause (bars) after a forecast resolves before a new one may start
+
+//--- proof window (stage 2: a candidate must prove itself)
+#define CONFIRM_BARS   3        // bars the market gets to prove a reversal true or false
+
+//--- forward projection (stage 3: measured move of the prior leg)
+#define RETR_TP1       0.382    // first projection: 38.2% retrace of the prior leg
+#define RETR_TP2       0.618    // full projection: 61.8% retrace of the prior leg
 
 //--- engine tuning (internal: self-adapting, deliberately not user inputs)
 #define EMA_FAST          20     // fast EMA
@@ -163,6 +172,27 @@ struct SPattern
    int               shift;       // shift of signal bar
   };
 
+// stage-2 candidate: a validated setup that still waits for market proof
+struct SPending
+  {
+   bool              used;
+   int               dir;
+   datetime          tDetect;
+   string            patternName;
+   int               code;
+   int               strength;
+   int               setupType;
+   int               score;
+   int               maxScore;
+   double            zoneHigh;    // reversal zone extremes: proof triggers
+   double            zoneLow;
+   double            legHigh;     // prior leg extremes: measured-move projection
+   double            legLow;
+   double            atr;
+   int               confirmBars;
+   int               confirmLeft;
+  };
+
 struct SSwings
   {
    bool              hasH;        // at least 1 swing high
@@ -247,6 +277,8 @@ int      g_setupType   = SETUP_REVERSAL;
 int      g_decision    = DEC_NONE;
 string   g_decisionNote= "";
 
+SPending  g_pend;                // stage-2 candidate waiting for proof
+string    g_pendNote  = "";      // last candidate outcome
 SForecast g_fc;                  // live forecast
 SForecast g_lastDone;            // last resolved forecast
 bool      g_hasDone   = false;
@@ -357,7 +389,7 @@ int OnInit()
    for(int i=0; i<MAX_RECENT; i++) g_recent[i]="";
 
    EventSetTimer(1);
-   Print("SmartTrader v1.40 Phase 1 started on ", _Symbol, " ", EnumToString(_Period),
+   Print("SmartTrader v1.50 Phase 1 started on ", _Symbol, " ", EnumToString(_Period),
          " | style: ", StyleName(),
          " | dynamic thresholds: ", (InpDynamic ? "ON" : "OFF"),
          " - market watch & forecast only, no orders will be placed.");
@@ -397,10 +429,13 @@ void OnTick()
    // 1. track the running forecast against the bar that just closed
    ForecastUpdate();
 
-   // 2. read the last closed candle like a human trader
+   // 2. stage 2: does the market prove or kill the pending candidate?
+   CandidateUpdate();
+
+   // 3. read the last closed candle like a human trader (stage 1: detect)
    AnalyzeLastBar();
 
-   // 3. render
+   // 4. render
    ForecastDrawLevels();
    PanelRender();
   }
@@ -1175,7 +1210,7 @@ void AnalyzeLastBar()
    if(mixedContinuation)
       need += 1;
 
-   // stability gates: a human does not flip direction with every candle
+   // flip protection: never build a new idea against a protected active forecast
    bool   flipBlocked = false;
    string gateNote    = "";
    if(g_fc.used && g_fc.status == FC_ACTIVE && g_lastPat.direction != g_fc.dir)
@@ -1184,22 +1219,18 @@ void AnalyzeLastBar()
       if(age < FLIP_MIN_AGE || g_score < need + 1)
         {
          flipBlocked = true;
-         gateNote = "active " + (g_fc.dir > 0 ? "BUY" : "SELL") + " forecast protected - opposite signal ignored";
+         gateNote = "active " + (g_fc.dir > 0 ? "BUY" : "SELL") + " forecast protected - opposite setup ignored";
         }
      }
-   bool coolBlocked = (TimeCurrent() < g_cooldownUntil);
-   if(coolBlocked)
-      gateNote = "cooldown " + IntegerToString((int)((g_cooldownUntil - TimeCurrent()) / PeriodSeconds(_Period))) +
-                 " bars after last forecast";
 
-   if(g_score >= need && !flipBlocked && !coolBlocked)
+   if(g_score >= need && !flipBlocked)
      {
-      g_decision = DEC_VALID;
+      g_decision = DEC_VALID;              // stage 1 passed -> candidate opens; stage 2 (proof) decides
       if(againstStrong)          g_decisionNote = "against strong trend - extra confirmation was required";
       else if(chopBreakout)      g_decisionNote = "choppy market - breakout needed extra confirmation";
       else if(mixedContinuation) g_decisionNote = "mixed structure - continuation needed extra confirmation";
      }
-   else if(g_score >= need && (flipBlocked || coolBlocked))
+   else if(g_score >= need && flipBlocked)
      {
       g_decision = DEC_WATCH;              // gated: shown on watchlist, not acted on
       g_decisionNote = gateNote;
@@ -1215,7 +1246,7 @@ void AnalyzeLastBar()
       g_decisionNote = "score below watchlist threshold (" + IntegerToString(g_minScoreWatch) + ")";
 
    if(g_decision == DEC_VALID)
-      StartForecast();
+      CandidateOpen();                     // NOT a forecast yet - the market must prove it first
    else if(g_decision == DEC_WATCH)
      {
       DrawSignalArrow(g_lastPat, false);
@@ -1295,49 +1326,189 @@ double CalcSL(int s, int d)
    return(sl);
   }
 
-void StartForecast()
+// how many bars a pattern spans (its "reversal zone" for proof triggers)
+int PatternSpan(int code)
   {
-   // one active forecast at a time - a human focuses on one trade idea
-   if(g_fc.used && g_fc.status == FC_ACTIVE)
+   switch(code)
      {
-      if(g_fc.dir == g_lastPat.direction)
-        {
-         g_decisionNote = "setup already tracked - forecast kept";
-         return;
-        }
-      g_fc.status  = FC_CANCELLED;
-      g_statC++;
-      PushRecent("cancelled (opposite signal)");
-      DrawResolveLabel(FC_CANCELLED, g_rates[1].close);
-      g_hasDone  = true;
-      g_lastDone = g_fc;
-      ResetForecast(g_fc);
+      case PC_MORNING_STAR:   case PC_EVENING_STAR:
+      case PC_THREE_SOLDIERS: case PC_THREE_CROWS:      return(3);
+      case PC_BULL_ENGULF:    case PC_BEAR_ENGULF:
+      case PC_PIERCING:       case PC_DARK_CLOUD:
+      case PC_TWEEZER_BOTTOM: case PC_TWEEZER_TOP:
+      case PC_HARAMI_BULL:    case PC_HARAMI_BEAR:      return(2);
+     }
+   return(1);
+  }
+
+//====================================================================//
+//  STAGE 2: CANDIDATE - "is this reversal true or false?"            //
+//====================================================================//
+//  A validated setup is NOT yet a forecast. Like a human who spotted
+//  a hammer but waits for proof, SmartTrader opens a candidate and
+//  gives the market CONFIRM_BARS bars to speak:
+//    close beyond the pattern's extreme  -> TRUE  -> build projection
+//    close beyond the opposite extreme   -> FALSE -> candidate killed
+//    neither within the window           -> expired (never happened)
+
+void CandidateOpen()
+  {
+   int span = PatternSpan(g_lastPat.code);
+   int s    = g_lastPat.shift;
+   int end  = s + span - 1;
+   if(end + 2 >= g_window)
+      return;
+   int len = MathMin(SWING_LOOKBACK, g_window - end - 1);
+
+   SPending p;
+   p.used        = true;
+   p.dir         = g_lastPat.direction;
+   p.tDetect     = g_rates[s].time;
+   p.patternName = g_lastPat.name;
+   p.code        = g_lastPat.code;
+   p.strength    = g_lastPat.strength;
+   p.setupType   = g_setupType;
+   p.score       = g_score;
+   p.maxScore    = g_maxScore;
+   p.zoneHigh    = HighestHigh(s, span);
+   p.zoneLow     = LowestLow(s, span);
+   double wHi = HighestHigh(end, len), wLo = LowestLow(end, len);
+   p.legHigh  = MathMax(wHi, p.zoneHigh);      // prior leg (projection base)
+   p.legLow   = MathMin(wLo, p.zoneLow);
+   p.atr         = g_atr[s];
+   p.confirmBars = CONFIRM_BARS;
+   p.confirmLeft = CONFIRM_BARS;
+
+   bool refreshed = g_pend.used;
+   g_pend    = p;
+   g_pendNote = refreshed ? "candidate refreshed with a newer " + g_lastPat.name : "";
+
+   DrawSignalArrow(g_lastPat, true);
+   HistoryScanIfNeeded();
+   if(InpAlertWatch)
+      Notify(AlertText(false));
+  }
+
+void CandidateUpdate()
+  {
+   if(!g_pend.used)
+      return;
+
+   int    d  = g_pend.dir;
+   double c1 = g_rates[1].close;
+   bool confirmed = (d > 0 ? c1 > g_pend.zoneHigh : c1 < g_pend.zoneLow);
+   bool failed    = (d > 0 ? c1 < g_pend.zoneLow  : c1 > g_pend.zoneHigh);
+
+   if(failed)   // the human's "this reversal was fake" moment
+     {
+      g_pendNote = "candidate FAILED (false reversal) at " + TimeToString(TimeCurrent(), TIME_MINUTES);
+      g_pend.used = false;
+      return;
      }
 
-   int d = g_lastPat.direction;
-   double atr = g_atr[1];
-   double entry = g_rates[1].close;
-   double sl = CalcSL(1, d);
-   if(atr <= 0 || sl <= 0 || entry <= 0)
+   if(confirmed)
+     {
+      // entry-time discipline: one idea at a time, flips need real conviction
+      if(g_fc.used && g_fc.status == FC_ACTIVE)
+        {
+         if(g_fc.dir == d)
+           {
+            g_pendNote = "candidate proved but a forecast already tracks this direction";
+            g_pend.used = false;
+            return;
+           }
+         int age = (int)((g_rates[1].time - g_fc.tSignal) / PeriodSeconds(_Period));
+         if(age >= FLIP_MIN_AGE && g_pend.score >= g_minScoreValid + 1)
+           {
+            g_fc.status = FC_CANCELLED;
+            g_statC++;
+            PushRecent("cancelled (proved flip)");
+            DrawResolveLabel(FC_CANCELLED, g_rates[1].close);
+            g_hasDone = true;
+            g_lastDone = g_fc;
+            ResetForecast(g_fc);
+           }
+         else
+           {
+            g_pendNote = "candidate proved but the active forecast is protected";
+            g_pend.used = false;
+            return;
+           }
+        }
+      if(TimeCurrent() < g_cooldownUntil)
+         return;                        // wait out the cooldown, keep the proof
+      StartForecast();
+      g_pend.used = false;
       return;
+     }
+
+   g_pend.confirmLeft--;
+   if(g_pend.confirmLeft <= 0)
+     {
+      g_pendNote = "candidate expired (no proof in " + IntegerToString(g_pend.confirmBars) +
+                   " bars) at " + TimeToString(TimeCurrent(), TIME_MINUTES);
+      g_pend.used = false;
+     }
+  }
+
+void DrawConfirmLabel(int d)
+  {
+   datetime t = g_rates[1].time;
+   string name = OBJ_PREFIX + "CNF_" + IntegerToString((long)t);
+   double price = (d > 0 ? g_rates[1].low - 0.8 * g_atr[1] : g_rates[1].high + 0.8 * g_atr[1]);
+   if(ObjectCreate(0, name, OBJ_TEXT, 0, t, price))
+     {
+      ObjectSetString(0, name, OBJPROP_TEXT, "PROVED");
+      ObjectSetInteger(0, name, OBJPROP_COLOR, d > 0 ? clrLime : clrTomato);
+      ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 8);
+      ObjectSetInteger(0, name, OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
+      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+     }
+  }
+
+void StartForecast()
+  {
+   if(!g_pend.used)
+      return;
+
+   int    d     = g_pend.dir;
+   double atr   = g_atr[1];
+   double entry = g_rates[1].close;              // entry at the PROOF bar close, like a human acting on confirmation
+   double sl    = CalcSL(1, d);
+   if(atr <= 0 || sl <= 0 || entry <= 0)
+     {
+      g_pendNote = "candidate dropped (bad data at proof)";
+      return;
+     }
    double slDist = MathAbs(entry - sl);
 
-   // spread sanity: the stop must be wide enough that trading costs are noise
+   // spread sanity: costs must stay noise vs the risk
    double spreadPrice = (double)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) * _Point;
    if(slDist < 2.0 * spreadPrice)
      {
-      g_decision     = DEC_WATCH;
-      g_decisionNote = "stop too tight vs spread (" + DoubleToString(slDist / _Point, 0) +
-                       " pts) - setup skipped";
+      g_pendNote = "candidate dropped: stop too tight vs spread (" +
+                   DoubleToString(slDist / _Point, 0) + " pts)";
       return;
      }
 
-   // targets as R-multiples of the real stop distance: risk one to make one / two
-   double tp1 = (d > 0 ? entry + g_tp1R * slDist : entry - g_tp1R * slDist);
-   double tp2 = (d > 0 ? entry + g_tp2R * slDist : entry - g_tp2R * slDist);
+   //--- FORWARD PROJECTION -------------------------------------------
+   // where may price go within the horizon? A human measures the prior
+   // leg and projects its retracement; the R-multiples are the floor.
+   double legSize = g_pend.legHigh - g_pend.legLow;
+   double tp1, tp2;
+   if(legSize > 0)
+     {
+      if(d > 0) { tp1 = g_pend.legLow  + RETR_TP1 * legSize;  tp2 = g_pend.legLow  + RETR_TP2 * legSize; }
+      else      { tp1 = g_pend.legHigh - RETR_TP1 * legSize;  tp2 = g_pend.legHigh - RETR_TP2 * legSize; }
+     }
+   else { tp1 = entry; tp2 = entry; }
+   double r1 = (d > 0 ? entry + 1.0 * slDist : entry - 1.0 * slDist);
+   double r2 = (d > 0 ? entry + 2.0 * slDist : entry - 2.0 * slDist);
+   tp1 = (d > 0 ? MathMax(tp1, r1) : MathMin(tp1, r1));   // reward at least 1R
+   tp2 = (d > 0 ? MathMax(tp2, r2) : MathMin(tp2, r2));   // and 2R
 
-   // duration: net DIRECTIONAL speed (path efficiency), not raw average range -
-   // a choppy market simply needs more time to travel the same distance
+   //--- how long the move may take: net directional speed
    double speed = AvgSpeed(SPEED_BARS, 1);
    if(speed <= 0) speed = atr * 0.3;
    double er       = EfficiencyRatio(1, SPEED_BARS);
@@ -1352,11 +1523,11 @@ void StartForecast()
    g_fc.dir        = d;
    g_fc.status     = FC_ACTIVE;
    g_fc.tSignal    = g_rates[1].time;
-   g_fc.patternName= g_lastPat.name;
-   g_fc.strength   = g_lastPat.strength;
-   g_fc.setupType  = g_setupType;
-   g_fc.score      = g_score;
-   g_fc.maxScore   = g_maxScore;
+   g_fc.patternName= g_pend.patternName;
+   g_fc.strength   = g_pend.strength;
+   g_fc.setupType  = g_pend.setupType;
+   g_fc.score      = g_pend.score;
+   g_fc.maxScore   = g_pend.maxScore;
    g_fc.entry      = entry;
    g_fc.sl         = sl;
    g_fc.tp1        = tp1;
@@ -1367,12 +1538,14 @@ void StartForecast()
    g_fc.tExpire    = (datetime)(g_rates[1].time + (long)g_fc.expiryBars * PeriodSeconds(_Period));
    g_fc.barsLeft   = g_fc.expiryBars;
 
-   HistoryScanFor(g_lastPat.code, d, g_setupType, g_fc.histWins, g_fc.histTotal);
+   HistoryScanFor(g_pend.code, d, g_pend.setupType, g_fc.histWins, g_fc.histTotal);
    UpdateHistNote(g_fc.histWins, g_fc.histTotal);
 
-   DrawSignalArrow(g_lastPat, true);
+   DrawSignalArrowAt(1, d, true);
+   DrawConfirmLabel(d);
    ForecastDrawLevels();
 
+   g_pendNote = "candidate PROVED -> forecast issued at " + TimeToString(TimeCurrent(), TIME_MINUTES);
    Notify(AlertText(true));
   }
 
@@ -1541,14 +1714,14 @@ void HistoryScanFor(int code, int dir, int setupType, double &wins, double &tota
 //  DRAWING                                                           //
 //====================================================================//
 
-void DrawSignalArrow(const SPattern &pat, bool strong)
+void DrawSignalArrowAt(int shift, int dir, bool strong)
   {
-   datetime t = g_rates[pat.shift].time;
+   datetime t = g_rates[shift].time;
    string name = OBJ_PREFIX + "SIG_" + IntegerToString((long)t);
    double price;
-   if(pat.direction > 0)
+   if(dir > 0)
      {
-      price = g_rates[pat.shift].low - 0.4 * g_atr[pat.shift];
+      price = g_rates[shift].low - 0.4 * g_atr[shift];
       if(ObjectCreate(0, name, OBJ_ARROW, 0, t, price))
         {
          ObjectSetInteger(0, name, OBJPROP_ARROWCODE, 233);
@@ -1558,7 +1731,7 @@ void DrawSignalArrow(const SPattern &pat, bool strong)
      }
    else
      {
-      price = g_rates[pat.shift].high + 0.4 * g_atr[pat.shift];
+      price = g_rates[shift].high + 0.4 * g_atr[shift];
       if(ObjectCreate(0, name, OBJ_ARROW, 0, t, price))
         {
          ObjectSetInteger(0, name, OBJPROP_ARROWCODE, 234);
@@ -1569,6 +1742,11 @@ void DrawSignalArrow(const SPattern &pat, bool strong)
    ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
    ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
    ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+  }
+
+void DrawSignalArrow(const SPattern &pat, bool strong)
+  {
+   DrawSignalArrowAt(pat.shift, pat.direction, strong);
   }
 
 void ForecastDrawLevels()
@@ -1603,12 +1781,6 @@ void HLine(string name, double price, color clr, int style, string tip)
    ObjectSetString(0, name, OBJPROP_TEXT, tip);
   }
 
-void ForecastFinishDrawing()
-  {
-   // convenience wrapper: resolve-label for the forecast that just finished
-   DrawResolveLabel(g_fc.status, g_rates[1].close);
-  }
-
 void DrawResolveLabel(int status, double price)
   {
    datetime t = g_rates[1].time;
@@ -1638,24 +1810,29 @@ void DrawResolveLabel(int status, double price)
 
 string AlertText(bool validated)
   {
-   string head = validated ? "VALIDATED" : "WATCHLIST";
+   string tf = StringSubstr(EnumToString(_Period), 7);
+   if(validated)   // stage 3: a PROVEN idea -> full forward forecast
+      return("SmartTrader FORECAST: " + (g_fc.dir > 0 ? "BUY " : "SELL ") + g_fc.patternName +
+             " PROVED | " + _Symbol + " " + tf +
+             " | score " + IntegerToString(g_fc.score) + "/" + IntegerToString(g_fc.maxScore) +
+             "\nEntry " + DoubleToString(g_fc.entry, _Digits) +
+             "  SL " + DoubleToString(g_fc.sl, _Digits) +
+             "  TP1 " + DoubleToString(g_fc.tp1, _Digits) +
+             "  TP2 " + DoubleToString(g_fc.tp2, _Digits) +
+             "\nHorizon " + IntegerToString(g_fc.expiryBars) + " bars (~" +
+             IntegerToString(g_fc.expBars) + " to TP1), until " +
+             TimeToString(g_fc.tExpire, TIME_DATE | TIME_MINUTES) +
+             "\nProjection: measured move of the prior leg, floor 1R/2R" +
+             "\n" + g_histNote);
+   // stage 1/2 message: candidate waiting for proof
    string dir  = (g_lastPat.direction > 0 ? "BUY" : "SELL");
-   string body = head + " " + dir + " setup | " + _Symbol + " " + StringSubstr(EnumToString(_Period), 7) +
-                 " | " + g_lastPat.name + " (" + SetupTypeName(g_setupType) + ")" +
-                 " | score " + IntegerToString(g_score) + "/" + IntegerToString(g_maxScore);
-
-   if(validated && g_fc.used)
-     {
-      body += "\nEntry " + DoubleToString(g_fc.entry, _Digits) +
-              "  SL " + DoubleToString(g_fc.sl, _Digits) +
-              "  TP1 " + DoubleToString(g_fc.tp1, _Digits) +
-              "  TP2 " + DoubleToString(g_fc.tp2, _Digits) +
-              "\n~" + IntegerToString(g_fc.expBars) + " bars to TP1, valid " +
-              IntegerToString(g_fc.expiryBars) + " bars (until " +
-              TimeToString(g_fc.tExpire, TIME_DATE|TIME_MINUTES) + ")" +
-              "\n" + g_histNote;
-     }
-   return("SmartTrader: " + body);
+   return("SmartTrader CANDIDATE: " + dir + " " + g_lastPat.name +
+          " (" + SetupTypeName(g_setupType) + ") | " + _Symbol + " " + tf +
+          " | score " + IntegerToString(g_score) + "/" + IntegerToString(g_maxScore) +
+          " | proof needed: close " + (g_lastPat.direction > 0 ? "above " : "below ") +
+          DoubleToString(g_lastPat.direction > 0 ? HighestHigh(g_lastPat.shift, PatternSpan(g_lastPat.code))
+                                                 : LowestLow(g_lastPat.shift, PatternSpan(g_lastPat.code)), _Digits) +
+          " within " + IntegerToString(CONFIRM_BARS) + " bars");
   }
 
 void Notify(string text)
@@ -1733,7 +1910,7 @@ void PanelRender()
    int n = 0;
 
    //--- header ---------------------------------------------------------
-   rows[n] = "SmartTrader v1.4 - Phase 1: Market Watch & Forecast  |  style: " + StyleName(); rc[n] = clrGold;      n++;
+   rows[n] = "SmartTrader v1.5 - Phase 1: Market Watch & Forecast  |  style: " + StyleName(); rc[n] = clrGold;      n++;
    rows[n] = _Symbol + "  " + StringSubstr(EnumToString(_Period), 7) +
              "  spread " + IntegerToString((int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD)) + " pts" +
              (g_statusMsg != "" ? "   [" + g_statusMsg + "]" : "");
@@ -1795,7 +1972,7 @@ void PanelRender()
       rows[n] = PanelCheckLine(3, 6);  rc[n] = clrSilver; n++;
       rows[n] = PanelCheckLine(6, 8);  rc[n] = clrSilver; n++;
       string dec;
-      if(g_decision == DEC_VALID)      dec = "VALIDATED - forecast issued";
+      if(g_decision == DEC_VALID)      dec = "VALIDATED - candidate opened, awaiting proof";
       else if(g_decision == DEC_WATCH) dec = "WATCHLIST - not confirmed yet";
       else                             dec = "ignored";
       rows[n] = "Score " + IntegerToString(g_score) + "/" + IntegerToString(g_maxScore) +
@@ -1809,8 +1986,32 @@ void PanelRender()
       rows[n] = "waiting for a setup to validate"; rc[n] = clrSilver; n++;
      }
 
-   //--- forecast -----------------------------------------------------------
-   rows[n] = "FORECAST"; rc[n] = clrGold; n++;
+   //--- candidate (stage 2) --------------------------------------------------
+   rows[n] = "CANDIDATE - PROOF WINDOW"; rc[n] = clrGold; n++;
+   if(g_pend.used)
+     {
+      rows[n] = (g_pend.dir > 0 ? "BUY " : "SELL ") + g_pend.patternName + " detected " +
+                TimeToString(g_pend.tDetect, TIME_MINUTES) + "  score " +
+                IntegerToString(g_pend.score) + "/" + IntegerToString(g_pend.maxScore) +
+                "  - proof left " + IntegerToString(g_pend.confirmLeft) + "/" +
+                IntegerToString(g_pend.confirmBars) + " bars";
+      rc[n] = DirColor(g_pend.dir); n++;
+      rows[n] = "true if close " + (g_pend.dir > 0 ? "> " : "< ") +
+                DoubleToString(g_pend.dir > 0 ? g_pend.zoneHigh : g_pend.zoneLow, _Digits) +
+                "   |   FALSE if close " + (g_pend.dir > 0 ? "< " : "> ") +
+                DoubleToString(g_pend.dir > 0 ? g_pend.zoneLow : g_pend.zoneHigh, _Digits);
+      rc[n] = clrSilver; n++;
+     }
+   else
+     {
+      rows[n] = (g_pendNote == "" ? "none - validated setups appear here for proof" : "last: " + g_pendNote);
+      rc[n] = (StringFind(g_pendNote, "FAILED") >= 0 ? clrTomato :
+              (StringFind(g_pendNote, "PROVED") >= 0 ? clrLime : clrSilver));
+      n++;
+     }
+
+   //--- forecast (stage 3) -----------------------------------------------------
+   rows[n] = "FORECAST - FORWARD HORIZON"; rc[n] = clrGold; n++;
    if(g_fc.used && g_fc.status == FC_ACTIVE)
      {
       int fage = (int)((TimeCurrent() - g_fc.tSignal) / PeriodSeconds(_Period));
@@ -1827,6 +2028,24 @@ void PanelRender()
       rows[n] = "~" + IntegerToString(g_fc.expBars) + " bars to TP1  |  expires in " +
                 IntegerToString(g_fc.barsLeft) + " bars (" +
                 TimeToString(g_fc.tExpire, TIME_MINUTES) + ")";
+      // live schedule check: is the move following the projected path?
+      double denom = (g_fc.dir > 0 ? g_fc.tp1 - g_fc.entry : g_fc.entry - g_fc.tp1);
+      if(denom > 0)
+        {
+         double progA = (g_fc.dir > 0 ? (g_rates[0].close - g_fc.entry)
+                                      : (g_fc.entry - g_rates[0].close)) / denom;
+         int elapsed = (int)((TimeCurrent() - g_fc.tSignal) / PeriodSeconds(_Period));
+         double progE = (g_fc.expBars > 0 ? (double)elapsed / g_fc.expBars : 0.0);
+         if(progA < 0) progA = 0;
+         if(progA > 1) progA = 1;
+         if(progE > 1) progE = 1;
+         bool onTrack = (progA >= progE * 0.7);
+         rows[n] = "horizon " + IntegerToString(g_fc.expiryBars) + " bars  |  schedule: " +
+                   (onTrack ? "on track" : "behind") + " (progress " +
+                   DoubleToString(100.0 * progA, 0) + "% vs " +
+                   DoubleToString(100.0 * progE, 0) + "% expected)";
+         rc[n] = (onTrack ? clrLime : clrGold); n++;
+        }
       rc[n] = clrSilver; n++;
       rows[n] = g_histNote; rc[n] = clrSilver; n++;
      }

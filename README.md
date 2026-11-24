@@ -34,19 +34,17 @@ MetaQuotes ID, then set `InpAlertPush = true` in the EA inputs.
 
 ---
 
-## 2. How it mirrors a human trader
+## 2. How it mirrors a human trader — the 3-stage pipeline
 
-| What a human does at the chart | What SmartTrader does |
-|---|---|
-| Watches every completed candle | Evaluates the **last closed** M5/M15 candle the moment a new bar opens (no repainting mid-bar) |
-| Knows what candles mean | Detects **19 candle patterns** (see §3) and grades them by strength |
-| Reads the trend | EMA20/EMA50 alignment + price location, **swing structure** (HH/HL vs LH/LL), ADX strength → `UP strong / UP / RANGE / DOWN / DOWN strong` |
-| Spots a reversal candle *in context* | A pattern only counts when its location fits (near swing support/resistance or a 20-bar extreme) |
-| Estimates where price may go | Forecast = entry, SL, TP1, TP2 (ATR-based, structure-aware) |
-| Estimates how far/long the move may go | ATR distance for targets; **expected bars to TP1** from the market's average speed; **expiry** = signal validation time |
-| Double-checks with indicator tools | **7-point validation checklist** (see §4) — thresholds **self-adapt** to the symbol and market context |
-| Glances at what history says | Scans the last 500 bars, replays **every occurrence of the same setup** and reports the real win-rate (`11/16 (69%) reached TP1 first`) |
-| Places the order and keeps watching | *(Phase 2)* — for now it tracks the live forecast on the chart and marks `TP1 OK / TP2 OK / SL X / expired` when it resolves |
+A human does not shout "SELL!" the second a reversal candle closes. He **detects**,
+then **proves**, then **projects** — SmartTrader now works in the same three stages:
+
+| Stage | What a human does | What SmartTrader does |
+|---|---|---|
+| **1. DETECT** | Watches every completed candle, knows what candles mean, reads the trend, spots a reversal in context, double-checks with indicator tools | Detects **19 patterns** (§3) on the **last closed** M5/M15 candle, reads trend (EMA + swing structure + ADX), runs the **7-point validation checklist** (§4) with self-adapting thresholds |
+| **2. PROVE** | "Is this reversal true or false?" — he *waits*, watching the next few bars: does price break the pattern high (true) or collapse back below the low (fake)? | A validated setup opens a **CANDIDATE** with a **proof window** (3 bars): `close beyond the pattern extreme` → **proved**; `close beyond the opposite extreme` → **FALSE reversal**, killed; nothing within the window → expired. The panel shows both trigger prices live |
+| **3. PROJECT** | Once proven, he looks **forward**: measuring the prior leg, he works out how far price may go over the next N bars, and only then acts | Only a **PROVED** idea issues a forecast: entry at the proof-bar close, SL behind structure, **TP1/TP2 = measured-move retracement of the prior leg (38.2% / 61.8%) with 1R/2R floors**, expected bars to TP1 from **net directional speed**, a **horizon** end time, and a live **schedule check** (`on track / behind`) comparing real progress vs the projected path |
+| Watching & learning | Glances at what history says; tracks his call to the end | Past-500-bar replay of the same setup (win-rate), live forecast tracked to `TP1 OK / TP2 OK / SL X / expired`, session scoreboard. Orders: *(Phase 2)* |
 
 ---
 
@@ -142,25 +140,32 @@ from (< 100 bars) or you set `InpDynamic = false`, it falls back to the static i
 
 ---
 
-## 5. The forecast
+## 5. The forecast — only for PROVEN ideas (stage 3)
 
-When a signal is validated, SmartTrader publishes (panel + chart lines + alert):
+Nothing is forecast when a pattern is merely validated. The forecast is issued **only
+after the proof window passes** (stage 2), and it is a genuine **forward projection**:
 
-- **Entry** — close of the signal candle (≈ next bar open, like a human acting now).
-- **Stop loss** — beyond the pattern low/high **and** the nearest swing, plus a 0.3×ATR
-  buffer, capped at 2.5×ATR so the stop stays sane.
-- **TP1 / TP2 — R-multiples of the actual stop distance** (risk one to make one / two):
-  Balanced 1R / 2R, Conservative 1.5R / 3R, Aggressive 0.8R / 1.6R. No more "risk 50
-  points to make 28" — the reward always matches the risk taken. The past-history
-  replay uses the same formula, so the shown win-rate matches the real targets.
-- **Expected duration** — bars to TP1 estimated from **net directional speed**:
-  average bar speed × path-efficiency (Kaufman ratio). A choppy market needs more
-  time to travel the same distance — no more optimistic "~3 bars" in two-sided chop.
-- **Signal validation time (expiry)** — ~2× the estimated time to TP1, never shorter
-  than the default window (M5 → 12 bars, M15 → 8), capped at 4×. After expiry the
-  forecast is marked `EXPIRED` — like a human cancelling a setup that didn't move.
+- **Entry** — close of the **proof bar** (the candle that confirmed the reversal),
+  exactly like a human acting on confirmation, not on hope.
+- **Stop loss** — beyond the proof bar's low/high **and** the nearest swing, plus a
+  0.3×ATR buffer, capped at 2.5×ATR so the stop stays sane.
+- **Forward projection (where price may go within the horizon)** — measured move:
+  TP1 = **38.2% retracement of the prior leg**, TP2 = **61.8% retracement**, with
+  **R-floors** so the reward always matches the risk (Balanced ≥ 1R / ≥ 2R,
+  Conservative ≥ 1.5R / ≥ 3R, Aggressive ≥ 0.8R / ≥ 1.6R). If the prior leg is too
+  shallow, the R-floor takes over; if the leg is deep, the measured move extends the
+  target beyond the floor — the way a human reads retracements.
+- **Expected duration** — bars to TP1 from **net directional speed** (average bar
+  speed × path-efficiency). A choppy market needs more time to travel the same
+  distance — realistic, not optimistic.
+- **Horizon (signal validation time)** — ~2× the estimated time to TP1, never shorter
+  than the default window (M5 → 12 bars, M15 → 8), capped at 4×. At horizon end the
+  forecast is marked `EXPIRED`.
+- **Live schedule check** — the panel compares **actual progress vs the projected
+  path** every bar (`on track` / `behind`, progress % vs expected %) — a human
+  watching his trade knows whether it is "moving as expected" or "stalling".
 - **Past-history win-rate** — the same setup replayed over the last 500 bars.
-- **Spread sanity** — if the structure stop is tighter than 2× spread, the setup is
+- **Spread sanity** — setups whose structure stop is tighter than 2× spread are
   skipped (costs would eat the trade).
 
 ### 5.1 Stability locks — no flip-flopping
