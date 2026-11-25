@@ -42,7 +42,7 @@ input bool   InpShowDetails = false; // Show details panel (right of main panel)
 
 #define OBJ_P        "ST1_"
 #define PANEL_FONT   10
-#define MAIN_W       370
+#define MAIN_W       420
 #define BARS_WANT    420
 #define BARS_MIN     260
 
@@ -1390,13 +1390,13 @@ string DeclLine(const SDecl &d, bool compact)
    if(compact) return(base);
    return(base +
           "\nentry " + DoubleToString(d.entry,_Digits) +
-          "  SL " + DoubleToString(d.sl,_Digits) +
-          "  TP1 " + DoubleToString(d.tp1,_Digits) +
-          "  TP2 " + DoubleToString(d.tp2,_Digits) +
-          "  lot " + DoubleToString(d.lots,2) +
-          "\nduration ~" + IntegerToString(d.durBars) + " bars to TP1 | time-stop " +
-          IntegerToString(d.timeStop) + " bars" +
-          " | mgmt: partial@TP1, BE after partial");
+          "   SL " + DoubleToString(d.sl,_Digits) +
+          "\nTP1 " + DoubleToString(d.tp1,_Digits) +
+          "   TP2 " + DoubleToString(d.tp2,_Digits) +
+          "\nlot " + DoubleToString(d.lots,2) +
+          "   ~" + IntegerToString(d.durBars) + " bars to TP1" +
+          "   time-stop " + IntegerToString(d.timeStop) + " bars" +
+          "\nmgmt: partial@TP1, BE after partial");
   }
 
 void CleanupDetails()
