@@ -355,6 +355,7 @@ public:
    string            tfName;
    int               slot;
    datetime          lastBar;
+   datetime          lastThink;    // once-per-closed-candle gate
    bool              ready;
 
    int               hE20;
@@ -412,7 +413,7 @@ public:
       tf      = a_tf;
       tfName  = a_name;
       slot    = a_slot;
-      lastBar = 0;
+      lastBar = 0; lastThink = 0;
       ready   = false;
       hE20    = iMA(_Symbol, tf, 20, 0, MODE_EMA, PRICE_CLOSE);
       hE50    = iMA(_Symbol, tf, 50, 0, MODE_EMA, PRICE_CLOSE);
@@ -1185,6 +1186,9 @@ public:
          if(tighter)
            {
             decl.tp1 = newTP; decl.tpUpdates++;
+            int run = EstBars(MathAbs(decl.tp1 - decl.entry));
+            decl.durBars  = decl.barsAge + run;            // runway follows the living TP
+            decl.timeStop = MathMax(decl.timeStop, decl.barsAge + run);
             OnDeclared("[" + tfName + "] TP tightened to " + DoubleToString(decl.tp1,_Digits) +
                        " - move weakening, take what the market gives");
            }
@@ -1204,6 +1208,9 @@ public:
          if(cand > 0 && farther && withinCap)
            {
             decl.tp1 = cand; decl.tpUpdates++;
+            int run = EstBars(MathAbs(decl.tp1 - decl.entry));
+            decl.durBars  = decl.barsAge + run;            // runway follows the living TP
+            decl.timeStop = MathMax(decl.timeStop, decl.barsAge + run);
             OnDeclared("[" + tfName + "] TP extended to " + DoubleToString(decl.tp1,_Digits) +
                        " - move still healthy, let it run");
            }
@@ -1420,8 +1427,13 @@ public:
      }
 
    // called after BOTH brains refreshed (living TP needs the other TF's read)
+   // closed-candle cadence; a brain whose history is still loading just waits
+   // (never touches empty arrays - that was the silent freeze)
    void ManageAndDetect(int otherDir, int otherRegime)
      {
+      if(!ready || n < 3) return;          // history not loaded yet - wait, don't crash
+      if(lastThink == r[1].time) return;   // think once per CLOSED candle
+      lastThink = r[1].time;
       TrackDecl(otherDir, otherRegime);
       DetectAndDeclare();
      }
@@ -1432,6 +1444,7 @@ public:
 //====================================================================//
 
 CTFBrain g_tf[2];                 // 0 = M5, 1 = M15 (both always computed, F2)
+bool     g_tfOK = true;           // F1: chart TF inside M5/M15 range
 
 string   g_events[8];             // rolling event log, newest first
 int      g_eventN = 0;
@@ -1544,7 +1557,9 @@ string DeclLine(const SDecl &d, bool compact)
           "\nTP " + DoubleToString(d.tp1,_Digits) +
           (d.tpUpdates > 0 ? "  (updated " + IntegerToString(d.tpUpdates) + "x by candles)" : "") +
           "\nlot " + DoubleToString(d.remLots,2) + " of " + DoubleToString(d.lots,2) +
-          "   ~" + IntegerToString(d.durBars) + " bars" +
+          "\ntime-left " +
+          IntegerToString((d.durBars - d.barsAge > 0 ? d.durBars - d.barsAge : 0)) +
+          " of " + IntegerToString(d.durBars) + " bars" +
           "   time-stop " + IntegerToString(d.timeStop) + " bars" +
           "\nmgmt: partial@+1R, BE, TP follows the candles");
   }
@@ -1566,11 +1581,13 @@ void RenderAll()
 
    AddRow(mr, mc, mn, "SmartTrader Mi1 - the brain (no orders)", CLR_HEAD);
 
+   bool connOK = (TerminalInfoInteger(TERMINAL_CONNECTED) != 0);
    string symType = g_pr.typeName;
    AddRow(mr, mc, mn,
           _Symbol + " [" + symType + "]  " + MarketStateText() +
+          (connOK ? "" : "  NO CONNECTION") +
           "  spread " + IntegerToString((int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD)) + " pts",
-          (g_msState==MS_OPEN ? CLR_NEUT : CLR_ATT));
+          (g_msState==MS_OPEN ? (connOK ? CLR_NEUT : CLR_DN) : CLR_ATT));
 
    if(g_msState != MS_OPEN)
      {
@@ -1729,14 +1746,31 @@ void RenderAll()
 //  EVENT HANDLERS                                                    //
 //====================================================================//
 
+//+------------------------------------------------------------------+
+//  F1: out-of-range notice - the EA STAYS on the chart and says why
+//+------------------------------------------------------------------+
+void PaintOutOfRange()
+  {
+   string rows[4]; color cols[4]; int n = 0;
+   AddRow(rows, cols, n, "SmartTrader", CLR_HEAD);
+   AddRow(rows, cols, n, "OUT OF RANGE - chart TF is " +
+          StringSubstr(EnumToString(_Period), 7), CLR_ATT);
+   AddRow(rows, cols, n, "return to M5 or M15", CLR_ATT);
+   AddRow(rows, cols, n, "the panel returns on its own when you switch back", CLR_DIM);
+   PaintPanel(OBJ_P+"M_", 8, 8, MAIN_W, rows, cols, n);
+  }
+
 int OnInit()
   {
-   //--- F1: timeframe guard
-   if(_Period != PERIOD_M5 && _Period != PERIOD_M15)
+   //--- F1: timeframe guard - stay attached, show the message (never unload)
+   g_tfOK = (_Period == PERIOD_M5 || _Period == PERIOD_M15);
+   if(!g_tfOK)
      {
-      Alert("SmartTrader: out of range timeframe - return to M5/M15. Current: ",
-            EnumToString(_Period));
-      return(INIT_FAILED);
+      Print("SmartTrader: chart TF ", EnumToString(_Period),
+            " out of range - return to M5/M15; the panel returns on its own.");
+      EventSetTimer(1);
+      PaintOutOfRange();
+      return(INIT_SUCCEEDED);
      }
 
    //--- F4: symbol type + F5 profile
@@ -1766,6 +1800,7 @@ void OnDeinit(const int reason)
 
 void OnTick()
   {
+   if(!g_tfOK) { PaintOutOfRange(); return; }
    UpdateMarketState();                    // F3: state first, every tick
    if(g_msState == MS_OPEN)
      {
@@ -1779,6 +1814,7 @@ void OnTick()
 
 void OnTimer()
   {
+   if(!g_tfOK) { PaintOutOfRange(); return; }
    UpdateMarketState();
    RenderAll();
   }
