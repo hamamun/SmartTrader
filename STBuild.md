@@ -169,6 +169,14 @@ the fixed TP1 — "the TP fixation process is not correct." Redesigned:
   event line and the panel shows "(updated Nx by candles)".
 - **Management:** partial at +1R (half banked), stop to breakeven, remainder
   rides the living TP.
+- **Tighten safety (bugfix after live test):** a tightened target may NEVER
+  cross back through the entry (a BUY's TP stays above entry, a SELL's below).
+  Tighten only arms once the move has >= 0.5R of substance (before that the SL
+  protects and early jitter must not chase the target). If no natural pause
+  remains past the entry, the move has failed -> the declaration closes early
+  with an honest "closed early" outcome instead of aiming at an impossible
+  target. Stopped-at-breakeven is reported as such in memory, not as an
+  invalidation.
 
 ---
 

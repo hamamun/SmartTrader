@@ -106,6 +106,7 @@ input bool   InpShowDetails = false; // Show details panel (right of main panel)
 #define DO_SL        3
 #define DO_TIMEOUT   4
 #define DO_SUPERSEDE 5
+#define DO_CLOSED    6
 
 // structural constants (market convention, F5-source-a)
 #define FIB_R1       0.382
@@ -1133,12 +1134,12 @@ public:
       // SL / target outcome
       if(decl.dir > 0)
         {
-         if(r[1].low  <= decl.sl)  { FinishDecl(DO_SL,  "invalidated"); return; }
+         if(r[1].low  <= decl.sl)  { FinishDecl(DO_SL,  (decl.beArmed ? "stopped at breakeven" : "invalidated")); return; }
          if(r[1].high >= decl.tp1) { FinishDecl(DO_TP1, "target hit");  return; }
         }
       else
         {
-         if(r[1].high >= decl.sl)  { FinishDecl(DO_SL,  "invalidated"); return; }
+         if(r[1].high >= decl.sl)  { FinishDecl(DO_SL,  (decl.beArmed ? "stopped at breakeven" : "invalidated")); return; }
          if(r[1].low  <= decl.tp1) { FinishDecl(DO_TP1, "target hit");  return; }
         }
       if(decl.barsAge >= decl.timeStop)
@@ -1178,10 +1179,23 @@ public:
       double distTP = (decl.dir > 0 ? decl.tp1 - r[1].close : r[1].close - decl.tp1);
 
       //--- RED: candles disagree -> tighten the target
+      // arms only once the move has substance (>=0.5R): before that the SL
+      // protects, and early jitter must not chase the target around
       if(red)
         {
+         if(move < 0.5*slDist) return;
          double newTP = NearestShelf(decl.dir, r[1].close, decl.tp1);
          if(newTP == 0) newTP = (decl.dir > 0 ? r[1].close + 0.4*a : r[1].close - 0.4*a);
+         // a target never crosses back through the entry: a BUY's TP stays
+         // ABOVE entry, a SELL's BELOW. No natural pause left past the entry
+         // -> the move has failed: close the forecast honestly
+         double tpFloor = (decl.dir > 0 ? decl.entry + 0.2*slDist : decl.entry - 0.2*slDist);
+         bool pastFloor = (decl.dir > 0 ? newTP >= tpFloor : newTP <= tpFloor);
+         if(!pastFloor)
+           {
+            FinishDecl(DO_CLOSED, "closed early - move failed (no pause past entry)");
+            return;
+           }
          bool tighter = (decl.dir > 0 ? newTP < decl.tp1 : newTP > decl.tp1);
          if(tighter)
            {
@@ -1189,8 +1203,7 @@ public:
             int run = EstBars(MathAbs(decl.tp1 - decl.entry));
             decl.durBars  = decl.barsAge + run;            // runway follows the living TP
             decl.timeStop = MathMax(decl.timeStop, decl.barsAge + run);
-            OnDeclared("[" + tfName + "] TP tightened to " + DoubleToString(decl.tp1,_Digits) +
-                       " - move weakening, take what the market gives");
+            OnDeclared("[" + tfName + "] TP tightened to " + DoubleToString(decl.tp1,_Digits) + " (weakening)");
            }
          return;
         }
@@ -1211,8 +1224,7 @@ public:
             int run = EstBars(MathAbs(decl.tp1 - decl.entry));
             decl.durBars  = decl.barsAge + run;            // runway follows the living TP
             decl.timeStop = MathMax(decl.timeStop, decl.barsAge + run);
-            OnDeclared("[" + tfName + "] TP extended to " + DoubleToString(decl.tp1,_Digits) +
-                       " - move still healthy, let it run");
+            OnDeclared("[" + tfName + "] TP extended to " + DoubleToString(decl.tp1,_Digits) + " (move healthy)");
            }
         }
      }
@@ -1477,6 +1489,7 @@ string OutcomeText(int o)
    if(o==DO_SL)  return("invalidated");
    if(o==DO_TIMEOUT) return("timed out");
    if(o==DO_SUPERSEDE) return("superseded");
+   if(o==DO_CLOSED)    return("closed early");
    return("active");
   }
 
