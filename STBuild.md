@@ -226,6 +226,35 @@ Milestone Mi1 = Steps 1-4 (the brain). Panel + inputs are part of Mi1.
 Font size = hardcoded 10. Main panel corner = hardcoded top-left. Push/e-mail
 alerts dropped for Mi1.
 
+**EVENT CATALOG (what the event line / journal / popup can say):**
+
+Popup + journal + event line (attention events):
+1. "DECLARED BUY/SELL [TF] <branch> - <selector event> at zone ..." - a plan
+   is born: full entry/SL/TP/lot/duration/time-stop attached.
+2. "declaration target hit" - the destination was reached.
+3. "declaration invalidated" - the stop line was hit before earning anything.
+4. "declaration stopped at breakeven - half was banked" - earned +1R first,
+   then came back to entry; scratch exit, half the position booked at +1R.
+5. "declaration timed out (time-stop)" - the plan's clock ran out; setup had
+   its chance.
+6. "declaration closed early - move failed (no pause past entry)" - the
+   candles turned against the idea and no honest target remained.
+7. "[TF] TP tightened to X (weakening)" - the living target pulled closer.
+8. "[TF] TP extended to X (move healthy)" - the living target pushed further.
+9. "selector rejected: stop tighter than 2x spread" - a setup was seen but
+   the road is too thin to pay spreads.
+10. "selector rejected: lot could not be computed" - broker reference data
+    missing/broken (rare).
+
+Journal + event line only (calm events - no popup):
+11. "[TF] +1R reached - half banked, stop to breakeven"
+12. "[TF] selector passed: no room to the next zone (N pts) - not every setup
+    deserves a trade"
+13. "[TF] old plan superseded - a new selector took over"
+
+Memory-line endings (one word per retired plan): target hit / invalidated /
+timed out / superseded / closed early / stopped at BE.
+
 ---
 
 ## Step 1 — TREND (approved)

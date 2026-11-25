@@ -1309,6 +1309,7 @@ public:
          decl.active = false;
          PushMemory(decl, "superseded by new selector (" + tfName + " " +
                     TimeToString(TimeCurrent(), TIME_MINUTES) + ")");
+         AddEvent("[" + tfName + "] old plan superseded - a new selector took over");
         }
 
       SZone z = zones[bestZone];
