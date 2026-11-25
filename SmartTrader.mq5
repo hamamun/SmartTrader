@@ -107,6 +107,7 @@ input bool   InpShowDetails = false; // Show details panel (right of main panel)
 #define DO_TIMEOUT   4
 #define DO_SUPERSEDE 5
 #define DO_CLOSED    6
+#define DO_BE        7
 
 // structural constants (market convention, F5-source-a)
 #define FIB_R1       0.382
@@ -223,7 +224,9 @@ int ClassifySymbol(string sym)
       if((c>='A' && c<='Z') || (c>='a' && c<='z'))
          letters += CharToString((uchar)c);
      }
-   if(StringLen(letters)==6)
+   // broker suffixes (EURUSDm, EURUSD.micro...) leave extra letters: accept a
+   // short tail (<=3) after the 6-letter pair
+   if(StringLen(letters)>=6 && StringLen(letters)<=9)
       return(SYM_FOREX);
    return(SYM_OTHER);
   }
@@ -1015,11 +1018,12 @@ public:
            {
             bool nearAbove = zones[nearIdx].price > c1;
             int fdir = (nearAbove ? -1 : 1);
-            double far = c1;
+            double far = c1; bool haveFar = false;
             for(int z=0; z<nZones; z++)
                if(z!=nearIdx && ((fdir>0 && zones[z].price>c1) || (fdir<0 && zones[z].price<c1)))
-                 { far = zones[z].price; break; }
-            if(far==c1) far = c1 + fdir*2*a;
+                  if(!haveFar || MathAbs(zones[z].price-c1) < MathAbs(far-c1))
+                    { far = zones[z].price; haveFar = true; }
+            if(!haveFar) far = c1 + fdir*2*a;
             SetBranch(0, "base: range fade at zone edge", fdir, far, far + fdir*(far-c1)*0.5,
                       zones[nearIdx].price + (nearAbove ? zones[nearIdx].thick + buf : -(zones[nearIdx].thick + buf)),
                       EstBars(MathAbs(far-c1)));
@@ -1131,15 +1135,18 @@ public:
       if(decl.dir > 0 && r[1].high > decl.bestFav) decl.bestFav = r[1].high;
       if(decl.dir < 0 && r[1].low  < decl.bestFav) decl.bestFav = r[1].low;
 
-      // SL / target outcome
+      // SL / target outcome (after +1R the plan's stop lives at breakeven)
+      double effSL = (decl.beArmed ? decl.entry : decl.sl);
       if(decl.dir > 0)
         {
-         if(r[1].low  <= decl.sl)  { FinishDecl(DO_SL,  (decl.beArmed ? "stopped at breakeven" : "invalidated")); return; }
+         if(r[1].low  <= effSL)   { FinishDecl((decl.beArmed ? DO_BE : DO_SL),
+                                      (decl.beArmed ? "stopped at breakeven - half was banked" : "invalidated")); return; }
          if(r[1].high >= decl.tp1) { FinishDecl(DO_TP1, "target hit");  return; }
         }
       else
         {
-         if(r[1].high >= decl.sl)  { FinishDecl(DO_SL,  (decl.beArmed ? "stopped at breakeven" : "invalidated")); return; }
+         if(r[1].high >= effSL)   { FinishDecl((decl.beArmed ? DO_BE : DO_SL),
+                                      (decl.beArmed ? "stopped at breakeven - half was banked" : "invalidated")); return; }
          if(r[1].low  <= decl.tp1) { FinishDecl(DO_TP1, "target hit");  return; }
         }
       if(decl.barsAge >= decl.timeStop)
@@ -1150,8 +1157,12 @@ public:
       if(!decl.beArmed && slDist > 0 && fav >= slDist)
         {
          decl.beArmed = true;
-         decl.remLots = NormalizeDouble(decl.lots/2.0, 2);
-         OnDeclared("[" + tfName + "] +1R reached - half banked, stop to breakeven (bookkeeping)");
+         double lstep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+         double lmin  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+         double half  = decl.lots/2.0;
+         if(lstep > 0) half = MathFloor(half/lstep)*lstep;
+         decl.remLots = (half >= lmin && half > 0 ? half : decl.lots); // too small to split -> keep full
+         AddEvent("[" + tfName + "] +1R reached - half banked, stop to breakeven");
         }
 
       //--- move health (the human's "is it going as expected?")
@@ -1293,7 +1304,7 @@ public:
       if(decl.active)
         {
          if(decl.dir == bestDir)
-           { OnDeclared("selector matched active declaration - kept"); return; }
+            return;                     // same idea still playing - nothing new to say
          decl.outcome = DO_SUPERSEDE;
          decl.active = false;
          PushMemory(decl, "superseded by new selector (" + tfName + " " +
@@ -1369,9 +1380,9 @@ public:
          bool blocked = (nextZone != 0 && MathAbs(nextZone - entry) < 0.8*slDist);
          if(blocked)
            {
-            OnDeclared("[" + tfName + "] selector passed: no room to the next zone (" +
-                       DoubleToString(MathAbs(nextZone - entry)/_Point, 0) +
-                       " pts) - not every setup deserves a trade");
+            AddEvent("[" + tfName + "] selector passed: no room to the next zone (" +
+                     DoubleToString(MathAbs(nextZone - entry)/_Point, 0) +
+                     " pts) - not every setup deserves a trade");
             return;
            }
          tp = (d > 0 ? entry + 0.8*slDist : entry - 0.8*slDist);
@@ -1438,7 +1449,9 @@ public:
       if(lstep > 0) lot = MathFloor(lot/lstep)*lstep;
       if(lot < lmin) lot = lmin;
       if(lot > lmax) lot = lmax;
-      return(NormalizeDouble(lot, 2));
+      int ld = 0; double s = (lstep > 0 ? lstep : 0.01);
+      while(s < 1.0 && ld < 8) { s *= 10.0; ld++; }
+      return(NormalizeDouble(lot, ld));
      }
 
    //------------------------------------------------------------------
@@ -1508,6 +1521,7 @@ string OutcomeText(int o)
    if(o==DO_TIMEOUT) return("timed out");
    if(o==DO_SUPERSEDE) return("superseded");
    if(o==DO_CLOSED)    return("closed early");
+   if(o==DO_BE)        return("stopped at BE");
    return("active");
   }
 
