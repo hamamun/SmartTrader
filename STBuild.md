@@ -148,6 +148,45 @@ detects which branch the market is making true, verifies, declares.
 
 ---
 
+## Mi1 UI CONTRACT (approved)
+
+Milestone Mi1 = Steps 1-4 (the brain). Panel + inputs are part of Mi1.
+
+**MAIN PANEL** (always; sections in this order):
+1. STATUS - symbol + type (forex/metals/energy/index/crypto), market state
+   OPEN / CLOSED (opens XX:XX server time) / HOLD, spread, bar countdown.
+   When market closed: only this section lives, all analysis frozen.
+2. TREND READ - one line per timeframe, BOTH always shown (own nature each):
+   direction + confidence + age + health (e.g. "M5: UP strong young -
+   pullback shallow").
+3. (nothing - map lives in details panel)
+4. (nothing - verdict lives in details panel)
+5. DECLARATION - when a branch executes: entry / SL / TP(s) / suggested lot /
+   expected duration / management rules; below: short memory list of recent
+   declarations and their outcomes (target hit / invalidated / timed out).
+6. EVENT LINE - rolling one-line log of what just happened ("zone B tested -
+   rejection", "alt branch died (timeout), tree rebuilt").
+
+**DETAILS PANEL** - secondary, input ShowDetails default FALSE:
+- false: engine still computes map/verdict every bar (declarations stay
+  valid), but panel does not paint them
+- true: renders below main panel - full zone table (price, type, strength,
+  stack reasons, IF/THEN expectation), full branch tree (target, time window,
+  invalidation, which branch price is tracking), expanded declaration history
+- own summary line on main panel even when hidden (pending user OK):
+  "map: 4 zones - verdict: base UP->X (N bars) - tracking: base"
+- styling: font hardcoded 10, top-left corner hardcoded, renders below main
+  panel, same color language (green up / red down / gold attention / gray neutral)
+
+**INPUTS - exactly 3, no others:**
+- Risk % per trade (default 1.0) - feeds suggested lot size
+- Popup alert (default true) - also everything logged to Experts journal
+- ShowDetails (default false) - secondary panel toggle
+Font size = hardcoded 10. Panel corner = hardcoded top-left. Push/e-mail
+alerts dropped for Mi1.
+
+---
+
 ## Step 1 — TREND (approved)
 
 The bot reads trend like human eyes, then confirms with tools:
