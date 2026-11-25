@@ -257,12 +257,12 @@ void UpdateMarketState()
       int dow = (dt.day_of_week + d) % 7;
       for(uint i=0; i<16; i++)
         {
-         SessionDate s;
-         if(!SymbolInfoSessionTrade(_Symbol, (ENUM_DAY_OF_WEEK)dow, i, s))
+         datetime sFrom = 0, sTo = 0;
+         if(!SymbolInfoSessionTrade(_Symbol, (ENUM_DAY_OF_WEEK)dow, i, sFrom, sTo))
             break;
          anySession = true;
-         long from = (long)s.from % 86400;
-         long to   = (long)s.to   % 86400;
+         long from = (long)sFrom % 86400;
+         long to   = (long)sTo   % 86400;
          if(to <= from)                       // overnight session
            {
             if(d==0 && (secs >= from || secs < to))
