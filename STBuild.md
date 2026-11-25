@@ -172,7 +172,7 @@ Milestone Mi1 = Steps 1-4 (the brain). Panel + inputs are part of Mi1.
 **DETAILS PANEL** - secondary, input ShowDetails default FALSE:
 - false: engine still computes map/verdict every bar (declarations stay
   valid), but panel does not paint them
-- true: renders below main panel - full zone table (price, type, strength,
+- true: renders RIGHT OF the main panel - full zone table (price, type, strength,
   stack reasons, IF/THEN expectation), full branch tree (target, time window,
   invalidation, which branch price is tracking), expanded declaration history
 - own summary line on main panel even when hidden (pending user OK):
