@@ -113,6 +113,11 @@ Rules of the verdict:
 5. The tree refreshes every closed bar - the verdict is a living document.
 6. Panel shows the tree: base/alt/stall, each with target, time window and
    invalidation price; the panel highlights which branch price is tracking.
+7. NOTE (user): example numbers (1.5 / 2.5 / 4 / 1) were ILLUSTRATIVE ONLY -
+   nothing is hardcoded. All values are computed dynamically from the map,
+   zones, fibs, ATR speed and symbol-type stats. The tree may hold many
+   computed IF/THEN branches; only the top-ranked few stay live/displayed
+   (a management discipline, not a numeric limit).
 
 ---
 
