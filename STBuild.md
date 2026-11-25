@@ -47,7 +47,7 @@ Rule: no step is built until the user approves it here. Each step = few words, n
 - [x] Fundamentals F1–F5 (approved)
 - [x] Step 2 — The precision map (approved, final)
 - [x] Step 3 — The verdict: scenario-tree forecast (approved)
-- [ ] Step 4 — Branch execution: candle events at zones + validation + proof (proposal next)
+- [x] Step 4 — Branch execution: detect, re-validate, declare (approved)
 - [ ] Step 5 — History exam (replay approved rules, honest stats)
 - [ ] Step 6 — Demo forward test (scoreboard)
 - [ ] Step 7 — Autotrading (Phase 2: risk lots, order management, overridable rails)
@@ -118,6 +118,33 @@ Rules of the verdict:
    zones, fibs, ATR speed and symbol-type stats. The tree may hold many
    computed IF/THEN branches; only the top-ranked few stay live/displayed
    (a management discipline, not a numeric limit).
+8. Coverage guarantee: up-branches + down-branches + the stall/timeout branch
+   together cover ALL outcomes - the market always meets some branch (by
+   design, since the tree is rebuilt every closed bar).
+
+---
+
+## Step 4 — BRANCH EXECUTION (approved)
+
+Role: precise WITNESS, not fortune-teller. Step 3 did the heavy work; Step 4
+detects which branch the market is making true, verifies, declares.
+
+1. Watch only at live branches' selector zones (no zone = no watch).
+2. Detect the selector: the 4 candle events at zones (rejection / dominance
+   flip / decisive break / false break) + zone tests decide WHICH branch is
+   coming true.
+3. Re-validate ("pencil -> ink"): before declaring, re-check the branch's
+   Step-3 numbers against the CURRENT refreshed map/tree (zones fade/move,
+   ATR regime shifts). Stale -> recompute or demote; never execute stale
+   numbers.
+4. Declare the order plan from the branch: entry (trigger confirmation),
+   SL (zone risk line), TP(s) (branch targets), suggested lot size
+   (risk budget / stop distance), expected duration (branch time window),
+   management rules (breakeven point, partial-exit level, time-stop).
+5. Arriving behavior matches no valid selector -> nothing declared (noise
+   filter); timeout branch eventually consumes the scenario, tree rebuilds.
+6. Output: declaration panel/alert (branch name, entry/SL/TP/lot/duration,
+   management). Placing REAL orders stays Phase 2 (Step 7).
 
 ---
 
