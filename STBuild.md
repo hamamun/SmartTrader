@@ -175,14 +175,18 @@ Milestone Mi1 = Steps 1-4 (the brain). Panel + inputs are part of Mi1.
   invalidation, which branch price is tracking), expanded declaration history
 - own summary line on main panel even when hidden (pending user OK):
   "map: 4 zones - verdict: base UP->X (N bars) - tracking: base"
-- styling: font hardcoded 10, top-left corner hardcoded, renders below main
-  panel, same color language (green up / red down / gold attention / gray neutral)
+- styling: font hardcoded 10, main panel top-left corner hardcoded; DETAILS
+  panel anchors RIGHT_UPPER corner (fixed gap from right edge) - both panels
+  anchor independently to opposite corners so each can grow (main panel will
+  expand with autotrading later) without ever overlapping; details panel
+  width capped ~55-60% of chart width; same color language (green up /
+  red down / gold attention / gray neutral)
 
 **INPUTS - exactly 3, no others:**
 - Risk % per trade (default 1.0) - feeds suggested lot size
 - Popup alert (default true) - also everything logged to Experts journal
-- ShowDetails (default false) - secondary panel toggle
-Font size = hardcoded 10. Panel corner = hardcoded top-left. Push/e-mail
+- ShowDetails (default false) - secondary panel toggle (RIGHT_UPPER corner)
+Font size = hardcoded 10. Main panel corner = hardcoded top-left. Push/e-mail
 alerts dropped for Mi1.
 
 ---
