@@ -46,13 +46,11 @@ Rule: no step is built until the user approves it here. Each step = few words, n
 - [x] Step 1 — Trend definition (approved)
 - [x] Fundamentals F1–F5 (approved)
 - [x] Step 2 — The precision map (approved, final)
-- [ ] Step 3 — Candle setups at locations (proposal next)
-- [ ] Step 4 — Signal validation checklist (few tools, few checks)
-- [ ] Step 5 — Forecast: entry / SL / TP / horizon (natural targets)
-- [ ] Step 6 — History exam (replay approved rules, honest stats)
-- [ ] Step 7 — Proof stage (true vs false reversal before acting)
-- [ ] Step 8 — Demo forward test (scoreboard)
-- [ ] Step 9 — Autotrading (Phase 2: risk lots, order management, overridable rails)
+- [x] Step 3 — The verdict: scenario-tree forecast (approved)
+- [ ] Step 4 — Branch execution: candle events at zones + validation + proof (proposal next)
+- [ ] Step 5 — History exam (replay approved rules, honest stats)
+- [ ] Step 6 — Demo forward test (scoreboard)
+- [ ] Step 7 — Autotrading (Phase 2: risk lots, order management, overridable rails)
 
 ---
 
@@ -90,6 +88,31 @@ lines). Levels = prices where the market has memory; fights happen there.
 - The prediction part done in advance: IF/THEN branches ARE the forecast;
   arriving candles only select which branch executes.
 - Living map - refreshed continuously like the professional watches.
+
+---
+
+## Step 3 — THE VERDICT (scenario-tree forecast, approved)
+
+After trend + map, on every closed bar the bot formulates the working verdict -
+the human's example: "price 1.5, trend up, drawing says next ~4 bars up to 2.5;
+if it reverses there -> down to 1; if it keeps going -> 4; other outcomes ->
+more IF/THEN branches."
+
+Rules of the verdict:
+1. NOT one prediction - a SCENARIO TREE ranked by probability:
+   base case / alternate case(s) / stall-timeout branch. Max 3-4 live branches.
+2. Every number is SOURCED, never guessed:
+   - targets = map zones + fib extensions of the leg (2.5, 4.0)
+   - reversal destination = lower zone / lifeline (1.0)
+   - time = ATR-based speed ("~4 bars" to target)
+   - invalidation per branch = beyond that zone's risk line
+3. Every branch is time-boxed: if the deadline passes without the move,
+   the branch dies and the tree is rebuilt.
+4. Branch selectors: the map's IF/THEN tripwires (zone tests + candle events,
+   Step 4) decide which branch becomes reality - the bot keeps watching.
+5. The tree refreshes every closed bar - the verdict is a living document.
+6. Panel shows the tree: base/alt/stall, each with target, time window and
+   invalidation price; the panel highlights which branch price is tracking.
 
 ---
 
