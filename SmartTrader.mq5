@@ -332,13 +332,13 @@ struct SDecl
    string            branch;
    double            entry;
    double            sl;
-   double            tp1;
-   double            tp2;
+   double            tp1;           // THE living target (updated by candle health)
    double            lots;
+   double            remLots;       // remaining size after partial
+   double            bestFav;       // best favorable excursion since entry
+   int               tpUpdates;     // how many times the candles moved the target
    int               durBars;
    int               timeStop;
-   double            beLevel;       // breakeven trigger (management)
-   double            partialLevel;  // partial-exit level (management)
    int               outcome;       // DO_*
    int               barsAge;
    bool              beArmed;
@@ -427,9 +427,10 @@ public:
    void ZeroDecl()
      {
       decl.active=false; decl.tfSlot=slot; decl.dir=0; decl.tDeclare=0;
-      decl.branch=""; decl.entry=0; decl.sl=0; decl.tp1=0; decl.tp2=0;
-      decl.lots=0; decl.durBars=0; decl.timeStop=0; decl.beLevel=0;
-      decl.partialLevel=0; decl.outcome=DO_ACTIVE; decl.barsAge=0; decl.beArmed=false;
+      decl.branch=""; decl.entry=0; decl.sl=0; decl.tp1=0;
+      decl.lots=0; decl.remLots=0; decl.bestFav=0; decl.tpUpdates=0;
+      decl.durBars=0; decl.timeStop=0;
+      decl.outcome=DO_ACTIVE; decl.barsAge=0; decl.beArmed=false;
      }
 
    double Body(int i)      { return(MathAbs(r[i].close - r[i].open)); }
@@ -1051,36 +1052,161 @@ public:
    //------------------------------------------------------------------
    // Step 4a: track the active declaration (outcome bookkeeping)
    //------------------------------------------------------------------
-   void TrackDecl()
+   //--- living-target helpers ----------------------------------------
+   // nearest minor swing (natural pause) between 'from' and 'limit'
+   double NearestShelf(int dir, double from, double limit)
+     {
+      double best = 0;
+      if(dir > 0)
+        {
+         for(int i=0; i<nHi; i++)
+           {
+            double p = swHiP[i];
+            if(p > from && (limit == 0 || p < limit))
+               if(best == 0 || p < best) best = p;
+           }
+        }
+      else
+        {
+         for(int i=0; i<nLo; i++)
+           {
+            double p = swLoP[i];
+            if(p < from && (limit == 0 || p > limit))
+               if(best == 0 || p > best) best = p;
+           }
+        }
+      return(best);
+     }
+
+   // next natural pause beyond the current target
+   double NextShelfBeyond(int dir, double tp)
+     {
+      double a = (atr[1] > 0 ? atr[1] : _Point);
+      double best = 0;
+      if(dir > 0)
+        {
+         for(int i=0; i<nHi; i++)
+            if(swHiP[i] > tp + 0.3*a && (best == 0 || swHiP[i] < best)) best = swHiP[i];
+        }
+      else
+        {
+         for(int i=0; i<nLo; i++)
+            if(swLoP[i] < tp - 0.3*a && (best == 0 || swLoP[i] > best)) best = swLoP[i];
+        }
+      return(best);
+     }
+
+   // road check: cap a target just before a strong zone sitting beyond it
+   double RoadCapped(int dir, double target)
+     {
+      double a = (atr[1] > 0 ? atr[1] : _Point);
+      double cap = target;
+      for(int z=0; z<nZones; z++)
+        {
+         if(zones[z].strength < 55) continue;
+         if(dir > 0 && zones[z].price > target && zones[z].price < cap + 2*zones[z].thick)
+            cap = MathMin(cap, zones[z].price - 0.2*a);
+         if(dir < 0 && zones[z].price < target && zones[z].price > cap - 2*zones[z].thick)
+            cap = MathMax(cap, zones[z].price + 0.2*a);
+        }
+      return(cap);
+     }
+
+   //------------------------------------------------------------------
+   // Step 4a: track the active declaration - outcomes + LIVING TARGET
+   //------------------------------------------------------------------
+   // The human's way: keep watching every candle. If the move is healthy,
+   // extend the target to the next natural pause; if the candles start
+   // disagreeing, tighten the target (take what the market gives).
+   void TrackDecl(int otherDir, int otherRegime)
      {
       if(!decl.active) return;
       decl.barsAge++;
-      if(decl.outcome==DO_ACTIVE || decl.outcome==DO_TP1)
+      double a = (atr[1] > 0 ? atr[1] : _Point);
+      double slDist = MathAbs(decl.entry - decl.sl);
+
+      // best favorable excursion since entry
+      if(decl.dir > 0 && r[1].high > decl.bestFav) decl.bestFav = r[1].high;
+      if(decl.dir < 0 && r[1].low  < decl.bestFav) decl.bestFav = r[1].low;
+
+      // SL / target outcome
+      if(decl.dir > 0)
         {
-         if(decl.dir > 0)
+         if(r[1].low  <= decl.sl)  { FinishDecl(DO_SL,  "invalidated"); return; }
+         if(r[1].high >= decl.tp1) { FinishDecl(DO_TP1, "target hit");  return; }
+        }
+      else
+        {
+         if(r[1].high >= decl.sl)  { FinishDecl(DO_SL,  "invalidated"); return; }
+         if(r[1].low  <= decl.tp1) { FinishDecl(DO_TP1, "target hit");  return; }
+        }
+      if(decl.barsAge >= decl.timeStop)
+        { FinishDecl(DO_TIMEOUT, "timed out (time-stop)"); return; }
+
+      // management: at +1R bank half, stop to breakeven, remainder rides
+      double fav = (decl.dir > 0 ? decl.bestFav - decl.entry : decl.entry - decl.bestFav);
+      if(!decl.beArmed && slDist > 0 && fav >= slDist)
+        {
+         decl.beArmed = true;
+         decl.remLots = NormalizeDouble(decl.lots/2.0, 2);
+         OnDeclared("[" + tfName + "] +1R reached - half banked, stop to breakeven (bookkeeping)");
+        }
+
+      //--- move health (the human's "is it going as expected?")
+      bool dirOK = (decl.dir > 0 ? (r[1].close >= r[1].open || Body(1) <= 0.5*a)
+                                 : (r[1].close <= r[1].open || Body(1) <= 0.5*a));
+      double move = (decl.dir > 0 ? decl.bestFav - decl.entry : decl.entry - decl.bestFav);
+      double retrFrac = 0;
+      if(move > 0)
+        {
+         double give = (decl.dir > 0 ? decl.bestFav - r[1].close : r[1].close - decl.bestFav);
+         retrFrac = give/move;
+        }
+      bool regimeAgainst = false;
+      if(slot == 0 && otherDir != 0 && otherDir != decl.dir && otherRegime == TRG_TREND)
+         regimeAgainst = true;                       // M5 idea vs a trending M15 the other way
+      if(slot == 1 && tRegime == TRG_BOX && tDir != 0 && tDir != decl.dir)
+         regimeAgainst = true;                       // M15 idea while own TF turned to a box
+
+      int warnings = 0;
+      if(!dirOK)          warnings++;
+      if(retrFrac >= 0.5) warnings++;
+      if(regimeAgainst)   warnings++;
+      bool red = (retrFrac >= 0.618) || (regimeAgainst && retrFrac >= 0.3);
+
+      double distTP = (decl.dir > 0 ? decl.tp1 - r[1].close : r[1].close - decl.tp1);
+
+      //--- RED: candles disagree -> tighten the target
+      if(red)
+        {
+         double newTP = NearestShelf(decl.dir, r[1].close, decl.tp1);
+         if(newTP == 0) newTP = (decl.dir > 0 ? r[1].close + 0.4*a : r[1].close - 0.4*a);
+         bool tighter = (decl.dir > 0 ? newTP < decl.tp1 : newTP > decl.tp1);
+         if(tighter)
            {
-            if(decl.outcome==DO_ACTIVE && r[1].low <= decl.sl)
-              { FinishDecl(DO_SL, "invalidated"); return; }
-            if(r[1].high >= decl.tp2)
-              { FinishDecl(DO_TP2, "TP2 hit"); return; }
-            if(decl.outcome==DO_ACTIVE && r[1].high >= decl.tp1)
-              { decl.outcome=DO_TP1; decl.beArmed=true; OnDeclared("partial TP1 hit - BE armed"); return; }
-            if(decl.outcome==DO_TP1 && decl.beArmed && r[1].low <= decl.entry)
-              { FinishDecl(DO_SL, "stopped at BE after partial"); return; }
+            decl.tp1 = newTP; decl.tpUpdates++;
+            OnDeclared("[" + tfName + "] TP tightened to " + DoubleToString(decl.tp1,_Digits) +
+                       " - move weakening, take what the market gives");
            }
-         else
+         return;
+        }
+
+      //--- GREEN: move healthy and near the target -> extend to next pause
+      if(warnings == 0 && distTP > 0 && distTP < 0.5*a)
+        {
+         double cand = NextShelfBeyond(decl.dir, decl.tp1);
+         double cap  = (legDir != 0 && legHigh > legLow ?
+                        (decl.dir > 0 ? legLow + FIB_E2*(legHigh-legLow)
+                                      : legHigh - FIB_E2*(legHigh-legLow)) : 0);
+         if(cand > 0) cand = RoadCapped(decl.dir, cand);
+         bool farther = (decl.dir > 0 ? cand > decl.tp1 : cand < decl.tp1);
+         bool withinCap = (cap == 0 || (decl.dir > 0 ? cand <= cap : cand >= cap));
+         if(cand > 0 && farther && withinCap)
            {
-            if(decl.outcome==DO_ACTIVE && r[1].high >= decl.sl)
-              { FinishDecl(DO_SL, "invalidated"); return; }
-            if(r[1].low <= decl.tp2)
-              { FinishDecl(DO_TP2, "TP2 hit"); return; }
-            if(decl.outcome==DO_ACTIVE && r[1].low <= decl.tp1)
-              { decl.outcome=DO_TP1; decl.beArmed=true; OnDeclared("partial TP1 hit - BE armed"); return; }
-            if(decl.outcome==DO_TP1 && decl.beArmed && r[1].high >= decl.entry)
-              { FinishDecl(DO_SL, "stopped at BE after partial"); return; }
+            decl.tp1 = cand; decl.tpUpdates++;
+            OnDeclared("[" + tfName + "] TP extended to " + DoubleToString(decl.tp1,_Digits) +
+                       " - move still healthy, let it run");
            }
-         if(decl.barsAge >= decl.timeStop)
-           { FinishDecl(DO_TIMEOUT, "timed out (time-stop)"); return; }
         }
      }
 
@@ -1165,37 +1291,57 @@ public:
       if(slDist < 2.0 * (double)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) * _Point)
         { OnDeclared("selector rejected: stop tighter than 2x spread"); return; }
 
-      // targets from the CURRENT map (pencil -> ink: tree/zone data is fresh)
-      double tp1 = 0, tp2 = 0;
+      //--- single LIVING target: the nearest NATURAL PAUSE (minor shelf),
+      //    road-checked; never a fake invented price; skipped when no room
+      double minR = (tRegime == TRG_TREND ? 0.8 : 0.6);   // choppy regime: accept quick pauses
+      double tp = 0;
       if(d > 0)
         {
-         for(int zz=0; zz<nZones; zz++)
-            if(zones[zz].price > entry + z.thick && (tp1==0 || zones[zz].price < tp1))
-               tp1 = zones[zz].price;
-         double ext1 = (legDir>0 && legHigh>legLow ? legLow + FIB_E1*(legHigh-legLow) : 0);
-         double ext2 = (legDir>0 && legHigh>legLow ? legLow + FIB_E2*(legHigh-legLow) : 0);
-         if(tp1==0 && ext1>entry) tp1 = ext1;
-         if(tp1==0) tp1 = entry + 1.5*slDist;
-         if(tp2==0) tp2 = (ext2 > tp1 ? ext2 : tp1 + 1.0*slDist);
-         if(tp1 < entry + slDist) tp1 = entry + slDist;              // reward >= 1R
-         if(tp2 < tp1 + slDist)   tp2 = tp1 + slDist;
+         for(int i=0; i<nHi; i++)
+           {
+            double p = swHiP[i];
+            if(p > entry + 0.2*a && p - entry >= minR*slDist && (tp == 0 || p < tp)) tp = p;
+           }
+         if(tp == 0) tp = entry + 1.2*a;                   // no shelf on the map: ATR projection
         }
       else
         {
-         for(int zz=0; zz<nZones; zz++)
-            if(zones[zz].price < entry - z.thick && (tp1==0 || zones[zz].price > tp1))
-               tp1 = zones[zz].price;
-         double ext1 = (legDir<0 && legHigh>legLow ? legHigh - FIB_E1*(legHigh-legLow) : 0);
-         double ext2 = (legDir<0 && legHigh>legLow ? legHigh - FIB_E2*(legHigh-legLow) : 0);
-         if(tp1==0 && ext1>0 && ext1<entry) tp1 = ext1;
-         if(tp1==0) tp1 = entry - 1.5*slDist;
-         if(tp2==0) tp2 = (ext2>0 && ext2<tp1 ? ext2 : tp1 - 1.0*slDist);
-         if(tp1 > entry - slDist) tp1 = entry - slDist;
-         if(tp2 > tp1 - slDist)   tp2 = tp1 - slDist;
+         for(int i=0; i<nLo; i++)
+           {
+            double p = swLoP[i];
+            if(p < entry - 0.2*a && entry - p >= minR*slDist && (tp == 0 || p > tp)) tp = p;
+           }
+         if(tp == 0) tp = entry - 1.2*a;
+        }
+
+      // never aim beyond the nearest zone in the direction (any strength)
+      double nextZone = 0;
+      for(int zz=0; zz<nZones; zz++)
+         if(((d > 0 && zones[zz].price > entry) || (d < 0 && zones[zz].price < entry)) &&
+            (nextZone == 0 || MathAbs(zones[zz].price - entry) < MathAbs(nextZone - entry)))
+            nextZone = zones[zz].price;
+      if(nextZone != 0)
+        {
+         if(d > 0 && tp > nextZone - 0.2*a) tp = nextZone - 0.2*a;
+         if(d < 0 && tp < nextZone + 0.2*a) tp = nextZone + 0.2*a;
+        }
+
+      // reward floor; if the road has no room for it, PASS the setup
+      if(MathAbs(tp - entry) < 0.8*slDist)
+        {
+         bool blocked = (nextZone != 0 && MathAbs(nextZone - entry) < 0.8*slDist);
+         if(blocked)
+           {
+            OnDeclared("[" + tfName + "] selector passed: no room to the next zone (" +
+                       DoubleToString(MathAbs(nextZone - entry)/_Point, 0) +
+                       " pts) - not every setup deserves a trade");
+            return;
+           }
+         tp = (d > 0 ? entry + 0.8*slDist : entry - 0.8*slDist);
         }
 
       // duration + management
-      int dur = EstBars(MathAbs(tp1 - entry));
+      int dur = EstBars(MathAbs(tp - entry));
       int tstop = MathMax(2*dur, StallBars());
 
       // suggested lot from risk (F5 computation, no user tuning)
@@ -1216,13 +1362,13 @@ public:
       decl.branch = bname;
       decl.entry = entry;
       decl.sl = sl;
-      decl.tp1 = tp1;
-      decl.tp2 = tp2;
+      decl.tp1 = tp;
       decl.lots = lot;
+      decl.remLots = lot;
+      decl.bestFav = entry;
+      decl.tpUpdates = 0;
       decl.durBars = dur;
       decl.timeStop = tstop;
-      decl.partialLevel = tp1;
-      decl.beLevel = entry;
       decl.outcome = DO_ACTIVE;
       decl.barsAge = 0;
       decl.beArmed = false;
@@ -1234,8 +1380,7 @@ public:
                  " [" + z.tagStr + " s" + DoubleToString(z.strength,0) + "]" +
                  " | entry " + DoubleToString(decl.entry,_Digits) +
                  " SL " + DoubleToString(decl.sl,_Digits) +
-                 " TP1 " + DoubleToString(decl.tp1,_Digits) +
-                 " TP2 " + DoubleToString(decl.tp2,_Digits) +
+                 " TP " + DoubleToString(decl.tp1,_Digits) + " (living)" +
                  " lot " + DoubleToString(decl.lots,2) +
                  " ~" + IntegerToString(decl.durBars) + " bars, time-stop " +
                  IntegerToString(decl.timeStop));
@@ -1272,7 +1417,12 @@ public:
       ComputeTrend();
       BuildMap();
       BuildTree();
-      TrackDecl();
+     }
+
+   // called after BOTH brains refreshed (living TP needs the other TF's read)
+   void ManageAndDetect(int otherDir, int otherRegime)
+     {
+      TrackDecl(otherDir, otherRegime);
       DetectAndDeclare();
      }
   };
@@ -1309,8 +1459,8 @@ void PushMemory(const SDecl &d, string note)
 
 string OutcomeText(int o)
   {
-   if(o==DO_TP1) return("TP1 hit");
-   if(o==DO_TP2) return("TP2 hit");
+   if(o==DO_TP1) return("target hit");
+   if(o==DO_TP2) return("target hit");
    if(o==DO_SL)  return("invalidated");
    if(o==DO_TIMEOUT) return("timed out");
    if(o==DO_SUPERSEDE) return("superseded");
@@ -1391,12 +1541,12 @@ string DeclLine(const SDecl &d, bool compact)
    return(base +
           "\nentry " + DoubleToString(d.entry,_Digits) +
           "   SL " + DoubleToString(d.sl,_Digits) +
-          "\nTP1 " + DoubleToString(d.tp1,_Digits) +
-          "   TP2 " + DoubleToString(d.tp2,_Digits) +
-          "\nlot " + DoubleToString(d.lots,2) +
-          "   ~" + IntegerToString(d.durBars) + " bars to TP1" +
+          "\nTP " + DoubleToString(d.tp1,_Digits) +
+          (d.tpUpdates > 0 ? "  (updated " + IntegerToString(d.tpUpdates) + "x by candles)" : "") +
+          "\nlot " + DoubleToString(d.remLots,2) + " of " + DoubleToString(d.lots,2) +
+          "   ~" + IntegerToString(d.durBars) + " bars" +
           "   time-stop " + IntegerToString(d.timeStop) + " bars" +
-          "\nmgmt: partial@TP1, BE after partial");
+          "\nmgmt: partial@+1R, BE, TP follows the candles");
   }
 
 void CleanupDetails()
@@ -1621,6 +1771,8 @@ void OnTick()
      {
       g_tf[0].OnNewBar();                  // F2: both TFs, each on own nature
       g_tf[1].OnNewBar();
+      g_tf[0].ManageAndDetect(g_tf[1].tDir, g_tf[1].tRegime);
+      g_tf[1].ManageAndDetect(g_tf[0].tDir, g_tf[0].tRegime);
      }
    RenderAll();
   }
