@@ -48,6 +48,8 @@ Rule: no step is built until the user approves it here. Each step = few words, n
 - [x] Step 2 — The precision map (approved, final)
 - [x] Step 3 — The verdict: scenario-tree forecast (approved)
 - [x] Step 4 — Branch execution: detect, re-validate, declare (approved)
+- [x] Mi1 UI contract (approved)
+- [x] BUILD: Mi1 v2.00 implemented (SmartTrader.mq5) - pending user verification in MT5
 - [ ] Step 5 — History exam (replay approved rules, honest stats)
 - [ ] Step 6 — Demo forward test (scoreboard)
 - [ ] Step 7 — Autotrading (Phase 2: risk lots, order management, overridable rails)

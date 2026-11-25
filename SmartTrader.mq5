@@ -1,2118 +1,1357 @@
 //+------------------------------------------------------------------+
 //|                                                  SmartTrader.mq5 |
-//|            SmartTrader - human-style market watch & forecast     |
-//|            Phase 1 : Observation only - NO orders are placed     |
+//|         SmartTrader - Mi1 (the brain): perceive, map, predict,   |
+//|         select. Forecast-only build - NO orders are placed.      |
 //+------------------------------------------------------------------+
-//| Works like a human trader sitting at the chart, in 3 stages:     |
-//|  1. DETECT  - reads every closed M5/M15 candle (20+ patterns),   |
-//|     the trend, and validates the setup with a modern engine      |
-//|     (QQE, Fisher, Choppiness, squeeze, adaptive percentiles).    |
-//|  2. PROVE  - a validated setup is only a CANDIDATE. Like a human |
-//|     doubting his reversal, it waits up to N bars for the market  |
-//|     to prove it: close beyond the pattern extreme = true, close  |
-//|     beyond the opposite extreme = FALSE reversal, else expired.  |
-//|  3. PROJECT - only a PROVEN idea gets a forward-horizon forecast:|
-//|     measured-move targets from the prior leg (floor 1R/2R),      |
-//|     expected bars to TP1 from net directional speed, a horizon   |
-//|     end time, and a live "on schedule / behind" progress check.  |
-//| Phase 2 (separate release) will place and manage the orders.     |
+//| Spec: STBuild.md (frozen Mi1 contract)                           |
+//|  F1 M5/M15 charts only - else "out of range, return to M5/M15".  |
+//|  F2 One instance computes BOTH timeframes, each on own nature.   |
+//|  F3 Market state first: OPEN / CLOSED(opens XX:XX server) /      |
+//|     HOLD - forecasting only when OPEN.                           |
+//|  F4 Symbol type: forex/metals/energy/index/crypto/other.         |
+//|  F5 All parameters auto from symbol-type profile (expert-tuned). |
+//|  Step1 Trend: swing structure (eyes) + EMA20/50 + CHOP + ATR.    |
+//|  Step2 Precision map: zones from 5 sources, confluence strength, |
+//|     volume grade, VWAP, IF/THEN per zone, risk lines, flip rule. |
+//|  Step3 Verdict: living scenario tree (base/alt/stall), numbers   |
+//|     sourced from map/fib/ATR - nothing hardcoded.                |
+//|  Step4 Branch execution: candle events at zones select branch,   |
+//|     re-validate, declare entry/SL/TP/lot/duration/management.    |
+//|  UI: main panel (status/trend/declaration/events) + details      |
+//|     panel right of main (ShowDetails). Exactly 3 inputs.         |
 //+------------------------------------------------------------------+
 #property copyright   "SmartTrader"
 #property link        "https://github.com/hamamun/SmartTrader"
-#property version     "1.50"
-#property description "SmartTrader Phase 1 - Market Watch & Forecast."
-#property description "Reads candles and trend like a human; validation thresholds self-adapt"
-#property description "to each symbol and the current market context (dynamic percentiles)."
-#property description "Publishes entry/SL/TP/forecast-duration/expiry + history win-rate."
-#property description "Observation only: this version never sends an order."
+#property version     "2.00"
+#property description "SmartTrader Mi1 - the brain (Steps 1-4). Forecast only, no orders."
+#property description "Reads M5+M15 on their own nature, draws the precision map, formulates"
+#property description "a living scenario tree, and declares a full plan when the market"
+#property description "proves a branch. Market state and symbol type checked first."
 
 //====================================================================//
-//  INPUTS - only what a trader actually chooses                      //
+//  INPUTS - exactly 3 (Mi1 UI contract)                              //
 //====================================================================//
-//  Every technical calibration (indicator periods, levels, percentiles,
-//  ATR multipliers) is self-adapting or tuned inside the EA. A trader
-//  concentrates on trading, not on settings.
 
-enum ENUM_ST_STYLE
+input double InpRiskPercent = 1.0;   // Risk % per trade (suggested lot sizing)
+input bool   InpAlertPopup  = true;  // Popup alert on declaration
+input bool   InpShowDetails = false; // Show details panel (right of main panel)
+
+//====================================================================//
+//  CONSTANTS                                                         //
+//====================================================================//
+
+#define OBJ_P        "ST1_"
+#define PANEL_FONT   10
+#define MAIN_W       370
+#define BARS_WANT    420
+#define BARS_MIN     260
+
+// colors
+#define CLR_HEAD     clrGold
+#define CLR_UP       clrLime
+#define CLR_DN       clrTomato
+#define CLR_ATT      clrGold
+#define CLR_NEUT     clrSilver
+#define CLR_DIM      clrDarkGray
+#define CLR_ENTRY    clrWhite
+#define CLR_BG       C'15,19,28'
+#define CLR_BORDER   clrDimGray
+
+// symbol types
+#define SYM_FOREX    0
+#define SYM_METALS   1
+#define SYM_ENERGY   2
+#define SYM_INDEX    3
+#define SYM_CRYPTO   4
+#define SYM_OTHER    5
+
+// market states
+#define MS_OPEN      0
+#define MS_CLOSED    1
+#define MS_HOLD      2
+
+// zone tags (bitmask)
+#define ZG_SWING     1
+#define ZG_LIFE      2
+#define ZG_SESS      4
+#define ZG_ROUND     8
+#define ZG_FIB       16
+#define ZG_VWAP      32
+#define ZG_BROKEN    64
+
+// trend fields
+#define TC_WEAK      1
+#define TC_MOD       2
+#define TC_STRONG    3
+#define TRG_BOX      0
+#define TRG_TRANS    1
+#define TRG_TREND    2
+#define TA_YOUNG     0
+#define TA_MATURE    1
+#define TA_OLD       2
+#define TH_SHALLOW   0
+#define TH_NORMAL    1
+#define TH_DEEP      2
+
+// branch status
+#define BR_WAIT      0
+#define BR_TRACK     1
+#define BR_EXEC      2
+#define BR_DEAD      3
+
+// declaration outcomes
+#define DO_ACTIVE    0
+#define DO_TP1       1
+#define DO_TP2       2
+#define DO_SL        3
+#define DO_TIMEOUT   4
+#define DO_SUPERSEDE 5
+
+// structural constants (market convention, F5-source-a)
+#define FIB_R1       0.382
+#define FIB_R2       0.500
+#define FIB_R3       0.618
+#define FIB_E1       1.272
+#define FIB_E2       1.618
+#define CHOP_BOX     61.8
+#define CHOP_TREND   38.2
+
+//====================================================================//
+//  SYMBOL TYPE PROFILE (F4 + F5)                                     //
+//====================================================================//
+
+struct SProfile
   {
-   ST_CONSERVATIVE = 0,   // Conservative - fewer, high-conviction signals
-   ST_BALANCED     = 1,   // Balanced (recommended)
-   ST_AGGRESSIVE   = 2    // Aggressive - more signals, tighter stops
+   int               type;            // SYM_*
+   string            typeName;
+   double            zoneATR;         // zone thickness, x ATR
+   double            swingSig;        // swing pivot significance, x ATR
+   double            roundGrid;       // primary round-number grid (price units)
+   double            roundGrid2;      // secondary grid (0 = none)
+   bool              asianRange;      // compute Asian session range (forex)
+   int               asianEndHour;    // server hour when Asian range completes
+   int               maxZones;        // zones kept on the map
+   double            breakBuf;        // SL buffer beyond zone, x ATR
+   int               stallM5;         // stall window, M5 bars
+   int               stallM15;        // stall window, M15 bars
   };
 
-input group "=== Trading style ==="
-input ENUM_ST_STYLE InpStyle = ST_BALANCED;   // How SmartTrader should judge the market
+SProfile g_pr;
 
-input group "=== Alerts ==="
-input bool InpAlertPopup = true;              // Popup alert on validated signal
-input bool InpAlertPush  = false;             // Push notification (phone)
-input bool InpAlertEmail = false;             // E-mail alert
-input bool InpAlertWatch = false;             // Also alert on watchlist signals
-
-input group "=== Panel ==="
-input ENUM_BASE_CORNER InpPanelCorner = CORNER_LEFT_UPPER;  // Panel corner
-input int              InpFontSize    = 9;                  // Panel font size
-
-input group "=== Advanced (leave as is if unsure) ==="
-input bool InpDynamic          = true;        // Self-adapting thresholds (recommended)
-input int  InpSignalExpiryBars = 0;           // Signal valid for N bars (0 = auto)
-
-//====================================================================//
-//  CONSTANTS / TYPES                                                 //
-//====================================================================//
-
-#define OBJ_PREFIX     "ST_"
-#define MAX_ROWS       30
-#define MAX_RECENT     5
-
-//--- forecast stability (human-like patience)
-#define FLIP_MIN_AGE   3        // min bars of an active forecast before an opposite flip may replace it
-#define COOLDOWN_BARS  2        // pause (bars) after a forecast resolves before a new one may start
-
-//--- proof window (stage 2: a candidate must prove itself)
-#define CONFIRM_BARS   3        // bars the market gets to prove a reversal true or false
-
-//--- forward projection (stage 3: measured move of the prior leg)
-#define RETR_TP1       0.382    // first projection: 38.2% retrace of the prior leg
-#define RETR_TP2       0.618    // full projection: 61.8% retrace of the prior leg
-
-//--- engine tuning (internal: self-adapting, deliberately not user inputs)
-#define EMA_FAST          20     // fast EMA
-#define EMA_SLOW          50     // slow EMA
-#define ADX_PERIOD        14
-#define RSI_PERIOD        14
-#define BB_PERIOD         20     // Bollinger period
-#define BB_DEV            2.0    // Bollinger deviation
-#define ATR_PERIOD        14
-#define VOL_AVG_BARS      20
-#define SWING_LOOKBACK    60
-#define SPEED_BARS        50     // bars used to estimate market speed
-#define FISHER_LEN        9      // Ehlers Fisher lookback
-#define CHOP_PERIOD       14     // Choppiness Index period
-#define CHOP_CHOPPY       61.8   // CHOP >= this -> choppy/range regime
-#define CHOP_TREND        38.2   // CHOP <= this -> trending regime
-#define QQE_FACTOR        4.236  // QQE trailing factor (phi squared)
-#define HISTORY_BARS      500    // past-history replay depth
-
-//--- static fallback limits (used only until the dynamic layer has learned)
-#define RSI_FALL_LO       35.0
-#define RSI_FALL_HI       65.0
-#define ADX_FALL_TREND    20.0
-#define ADX_FALL_STRONG   25.0
-#define VOL_FALL_MULT     1.3
-#define LOC_ATR_FRAC      0.5    // location tolerance around a swing
-
-//--- dynamic-learning calibration
-#define DYN_LOOKBACK      300    // bars used to learn the symbol's behavior
-#define DYN_RSI_PCT_LO    15.0   // RSI oversold percentile
-#define DYN_RSI_PCT_HI    85.0   // RSI overbought percentile
-#define DYN_ADX_PCT_TREND 60.0   // ADX percentile for "trending"
-#define DYN_ADX_PCT_STRONG 75.0  // ADX percentile for "strong trend"
-#define DYN_VOL_PCT       70.0   // volume "real interest" percentile
-#define DYN_ATR_EXPAND    1.30   // ATR vs median: expanding
-#define DYN_ATR_SHRINK    0.75   // ATR vs median: contracting
-
-// pattern classes
-#define PC_NONE            0
-#define PC_MORNING_STAR    1
-#define PC_EVENING_STAR    2
-#define PC_THREE_SOLDIERS  3
-#define PC_THREE_CROWS     4
-#define PC_BULL_ENGULF     5
-#define PC_BEAR_ENGULF     6
-#define PC_PIERCING        7
-#define PC_DARK_CLOUD      8
-#define PC_TWEEZER_BOTTOM  9
-#define PC_TWEEZER_TOP     10
-#define PC_HAMMER          11
-#define PC_SHOOTING_STAR   12
-#define PC_DRAGONFLY       13
-#define PC_GRAVESTONE      14
-#define PC_MARU_BULL       15
-#define PC_MARU_BEAR       16
-#define PC_HARAMI_BULL     17
-#define PC_HARAMI_BEAR     18
-#define PC_DOJI            19
-
-// trend states
-#define TR_DOWN_STRONG     0
-#define TR_DOWN            1
-#define TR_RANGE           2
-#define TR_UP              3
-#define TR_UP_STRONG       4
-
-// setup types
-#define SETUP_REVERSAL     0
-#define SETUP_CONTINUATION 1
-
-// decision
-#define DEC_NONE           0
-#define DEC_WATCH          1
-#define DEC_VALID          2
-
-// forecast status
-#define FC_ACTIVE          0
-#define FC_TP1             1
-#define FC_TP2             2
-#define FC_SL              3
-#define FC_EXPIRED         4
-#define FC_CANCELLED       5
-
-// check state
-#define CK_PASS            0
-#define CK_FAIL            1
-#define CK_NA              2
-
-struct SPattern
+void InitProfile(int type)
   {
-   int               code;
-   string            name;
-   int               direction;   // +1 bull, -1 bear, 0 neutral
-   int               strength;    // 1..3
-   int               shift;       // shift of signal bar
+   g_pr.type       = type;
+   g_pr.asianRange = false;
+   g_pr.asianEndHour = 7;
+   switch(type)
+     {
+      case SYM_FOREX:
+         g_pr.typeName="forex";  g_pr.zoneATR=0.45; g_pr.swingSig=0.20;
+         g_pr.roundGrid=0.0100;  g_pr.roundGrid2=0.0050;
+         g_pr.asianRange=true;   g_pr.maxZones=6;
+         g_pr.breakBuf=0.30;     g_pr.stallM5=12;  g_pr.stallM15=8;
+         break;
+      case SYM_METALS:
+         g_pr.typeName="metals"; g_pr.zoneATR=0.50; g_pr.swingSig=0.25;
+         g_pr.roundGrid=5.0;     g_pr.roundGrid2=2.5;
+         g_pr.maxZones=6;        g_pr.breakBuf=0.35;
+         g_pr.stallM5=12;        g_pr.stallM15=8;
+         break;
+      case SYM_ENERGY:
+         g_pr.typeName="energy"; g_pr.zoneATR=0.55; g_pr.swingSig=0.25;
+         g_pr.roundGrid=1.0;     g_pr.roundGrid2=0.5;
+         g_pr.maxZones=6;        g_pr.breakBuf=0.35;
+         g_pr.stallM5=12;        g_pr.stallM15=8;
+         break;
+      case SYM_INDEX:
+         g_pr.typeName="index";  g_pr.zoneATR=0.50; g_pr.swingSig=0.22;
+         g_pr.roundGrid=100.0;   g_pr.roundGrid2=50.0;
+         g_pr.maxZones=6;        g_pr.breakBuf=0.30;
+         g_pr.stallM5=12;        g_pr.stallM15=8;
+         break;
+      case SYM_CRYPTO:
+         g_pr.typeName="crypto"; g_pr.zoneATR=0.60; g_pr.swingSig=0.30;
+         g_pr.roundGrid=1000.0;  g_pr.roundGrid2=500.0;
+         g_pr.maxZones=6;        g_pr.breakBuf=0.40;
+         g_pr.stallM5=14;        g_pr.stallM15=10;
+         break;
+      default:
+         g_pr.typeName="other";  g_pr.zoneATR=0.50; g_pr.swingSig=0.25;
+         g_pr.roundGrid=0.0;     g_pr.roundGrid2=0.0;
+         g_pr.maxZones=6;        g_pr.breakBuf=0.35;
+         g_pr.stallM5=12;        g_pr.stallM15=8;
+     }
+  }
+
+int ClassifySymbol(string sym)
+  {
+   string s = sym;
+   StringToUpper(s);
+   // metals
+   if(StringFind(s,"XAU")>=0 || StringFind(s,"GOLD")>=0 ||
+      StringFind(s,"XAG")>=0 || StringFind(s,"SILVER")>=0 ||
+      StringFind(s,"XPT")>=0 || StringFind(s,"XPD")>=0)
+      return(SYM_METALS);
+   // energy
+   if(StringFind(s,"OIL")>=0 || StringFind(s,"WTI")>=0 || StringFind(s,"BRENT")>=0 ||
+      StringFind(s,"NGAS")>=0 || StringFind(s,"NATGAS")>=0 || StringFind(s,"COAL")>=0 ||
+      StringFind(s,"HEATING")>=0)
+      return(SYM_ENERGY);
+   // crypto
+   if(StringFind(s,"BTC")>=0 || StringFind(s,"ETH")>=0 || StringFind(s,"XRP")>=0 ||
+      StringFind(s,"SOL")>=0 || StringFind(s,"DOGE")>=0 || StringFind(s,"ADA")>=0 ||
+      StringFind(s,"LTC")>=0 || StringFind(s,"DOT")>=0 || StringFind(s,"BCH")>=0 ||
+      StringFind(s,"XLM")>=0 || StringFind(s,"AVAX")>=0 || StringFind(s,"LINK")>=0)
+      return(SYM_CRYPTO);
+   // indices
+   if(StringFind(s,"UK100")>=0 || StringFind(s,"US30")>=0 || StringFind(s,"US100")>=0 ||
+      StringFind(s,"US500")>=0 || StringFind(s,"NAS")>=0  || StringFind(s,"SPX")>=0  ||
+      StringFind(s,"GER40")>=0 || StringFind(s,"DE40")>=0 || StringFind(s,"DE30")>=0 ||
+      StringFind(s,"DAX")>=0  || StringFind(s,"JPN225")>=0 || StringFind(s,"FTSE")>=0 ||
+      StringFind(s,"DJI")>=0  || StringFind(s,"NDX")>=0   || StringFind(s,"NIKKEI")>=0 ||
+      StringFind(s,"HK50")>=0 || StringFind(s,"AUS200")>=0 || StringFind(s,"EU50")>=0 ||
+      StringFind(s,"STOXX")>=0 || StringFind(s,"CAC")>=0  || StringFind(s,"IBEX")>=0 ||
+      StringFind(s,"SMI")>=0  || StringFind(s,"ASX")>=0   || StringFind(s,"TSX")>=0 ||
+      StringFind(s,"DOW")>=0  || StringFind(s,"SP500")>=0)
+      return(SYM_INDEX);
+   // forex fallback: 6 alphabetic chars (suffix-stripped)
+   string letters="";
+   for(int i=0; i<StringLen(sym); i++)
+     {
+      ushort c = StringGetCharacter(sym, i);
+      if((c>='A' && c<='Z') || (c>='a' && c<='z'))
+         letters += CharToString((uchar)c);
+     }
+   if(StringLen(letters)==6)
+      return(SYM_FOREX);
+   return(SYM_OTHER);
+  }
+
+//====================================================================//
+//  MARKET STATE (F3)                                                 //
+//====================================================================//
+
+int      g_msState    = MS_CLOSED;
+datetime g_msNextOpen = 0;
+string   g_msNote     = "checking...";
+
+void UpdateMarketState()
+  {
+   long tmode = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_MODE);
+   if(tmode==SYMBOL_TRADE_MODE_DISABLED)
+     { g_msState=MS_HOLD;  g_msNote="trading disabled by broker"; return; }
+   if(tmode==SYMBOL_TRADE_MODE_CLOSEONLY)
+     { g_msState=MS_HOLD;  g_msNote="close-only mode (broker)";  return; }
+
+   datetime now   = TimeCurrent();
+   long     secs  = (long)now % 86400;
+   datetime dayStart = (datetime)((long)now - secs);
+   MqlDateTime dt;
+   TimeToStruct(now, dt);
+
+   bool anySession=false, open=false;
+   datetime nextOpen=0;
+
+   for(int d=0; d<7 && !open; d++)
+     {
+      int dow = (dt.day_of_week + d) % 7;
+      for(uint i=0; i<16; i++)
+        {
+         SessionDate s;
+         if(!SymbolInfoSessionTrade(_Symbol, (ENUM_DAY_OF_WEEK)dow, i, s))
+            break;
+         anySession = true;
+         long from = (long)s.from % 86400;
+         long to   = (long)s.to   % 86400;
+         if(to <= from)                       // overnight session
+           {
+            if(d==0 && (secs >= from || secs < to))
+               open = true;                   // today's late-evening part or after-midnight part
+           }
+         else if(d==0 && secs >= from && secs < to)
+            open = true;
+         if(nextOpen==0)
+           {
+            datetime st = (datetime)((long)dayStart + (long)d*86400 + from);
+            if(st > now)
+               nextOpen = st;
+           }
+        }
+     }
+
+   if(!anySession)
+     { g_msState=MS_OPEN; g_msNote="24/7 market"; return; }
+   if(open)
+     { g_msState=MS_OPEN; g_msNote=""; return; }
+
+   g_msState    = MS_CLOSED;
+   g_msNextOpen = nextOpen;
+   g_msNote     = (nextOpen>0 ?
+                   "market closed - opens " + TimeToString(nextOpen, TIME_DATE|TIME_MINUTES) + " (server time)" :
+                   "market closed - broker schedule unavailable");
+  }
+
+//====================================================================//
+//  SHARED STRUCTS                                                    //
+//====================================================================//
+
+struct SZone
+  {
+   double            price;
+   double            thick;
+   int               tags;          // ZG_* bitmask
+   string            tagStr;
+   int               touches;
+   double            drama;         // avg volume ratio at touch bars
+   double            recencyF;      // 0.1..1
+   double            strength;      // 0..100
+   double            slForBuy;      // stop level for longs from this zone
+   double            slForSell;     // stop level for shorts from this zone
+   bool              isLifeline;
+   int               brokenDir;     // +1 broken upward, -1 broken downward, 0 none (flip rule)
   };
 
-// stage-2 candidate: a validated setup that still waits for market proof
-struct SPending
+struct SBranch
   {
    bool              used;
-   int               dir;
-   datetime          tDetect;
-   string            patternName;
-   int               code;
-   int               strength;
-   int               setupType;
-   int               score;
-   int               maxScore;
-   double            zoneHigh;    // reversal zone extremes: proof triggers
-   double            zoneLow;
-   double            legHigh;     // prior leg extremes: measured-move projection
-   double            legLow;
-   double            atr;
-   int               confirmBars;
-   int               confirmLeft;
-  };
-
-struct SSwings
-  {
-   bool              hasH;        // at least 1 swing high
-   bool              hasH2;       // 2 swing highs found
-   bool              hasL;
-   bool              hasL2;
-   double            sh1, sh2;    // prices of last / previous swing high
-   double            sl1, sl2;    // prices of last / previous swing low
-   int               sh1s, sh2s;  // their shifts
-   int               sl1s, sl2s;
-  };
-
-struct STrend
-  {
-   int               state;
-   int               dir;         // +1 / 0 / -1
-   double            adx;
-   double            pdi;
-   double            mdi;
-   double            ema20;
-   double            ema50;
-   int               swingDir;    // +1 HH+HL, -1 LH+LL, 0 mixed
-   string            note;
-  };
-
-struct SCheck
-  {
    string            name;
-   int               state;       // CK_PASS / CK_FAIL / CK_NA
-   string            detail;
+   int               dir;           // +1 / -1 / 0 (stall)
+   double            target1;
+   double            target2;
+   double            invalid;       // scenario invalidation price
+   int               bars;          // estimated bars to target
+   int               status;        // BR_*
   };
 
-struct SForecast
+struct SDecl
   {
-   bool              used;
+   bool              active;
+   int               tfSlot;        // 0=M5 1=M15
    int               dir;
-   int               status;
-   datetime          tSignal;
-   string            patternName;
-   int               strength;
-   int               setupType;
-   int               score;
-   int               maxScore;
+   datetime          tDeclare;
+   string            branch;
    double            entry;
    double            sl;
    double            tp1;
    double            tp2;
-   double            atr;
-   int               expBars;
-   int               expiryBars;
-   datetime          tExpire;
-   int               barsLeft;
-   double            histWins;
-   double            histTotal;
+   double            lots;
+   int               durBars;
+   int               timeStop;
+   double            beLevel;       // breakeven trigger (management)
+   double            partialLevel;  // partial-exit level (management)
+   int               outcome;       // DO_*
+   int               barsAge;
+   bool              beArmed;
+  };
+
+//====================================================================//
+//  PER-TIMEFRAME BRAIN (Steps 1-4, one per TF, independent)          //
+//====================================================================//
+
+class CTFBrain
+  {
+public:
+   ENUM_TIMEFRAMES   tf;
+   string            tfName;
+   int               slot;
+   datetime          lastBar;
+   bool              ready;
+
+   int               hE20;
+   int               hE50;
+   int               hATR;
+
+   MqlRates          r[];
+   double            e20[];
+   double            e50[];
+   double            atr[];
+   long              v[];
+   int               n;
+   double            volAvg;
+
+   // swings (newest first)
+   double            swHiP[];
+   int               swHiB[];
+   int               nHi;
+   double            swLoP[];
+   int               swLoB[];
+   int               nLo;
+
+   // trend (Step 1)
+   int               tDir;
+   int               tConf;        // TC_*
+   int               tRegime;      // TRG_*
+   int               tAge;         // TA_*
+   int               tAgeBars;
+   int               tHealth;      // TH_*
+   double            chop;
+   double            vwap;
+   double            speed;        // avg |close delta| per bar
+   string            trendLine;
+
+   // fib leg (map + targets source)
+   double            legLow;
+   double            legHigh;
+   int               legDir;
+
+   // map (Step 2)
+   SZone             zones[];
+   int               nZones;
+   int               atZone;       // index of zone price sits in, else -1
+   string            locLine;
+
+   // verdict tree (Step 3)
+   SBranch           br[3];        // 0=base 1=alt 2=stall
+   string            trackLine;
+
+   // declaration (Step 4)
+   SDecl             decl;
+
+   void Configure(ENUM_TIMEFRAMES a_tf, string a_name, int a_slot)
+     {
+      tf      = a_tf;
+      tfName  = a_name;
+      slot    = a_slot;
+      lastBar = 0;
+      ready   = false;
+      hE20    = iMA(_Symbol, tf, 20, 0, MODE_EMA, PRICE_CLOSE);
+      hE50    = iMA(_Symbol, tf, 50, 0, MODE_EMA, PRICE_CLOSE);
+      hATR    = iATR(_Symbol, tf, 14);
+      ZeroDecl();
+      tDir=0; tConf=TC_WEAK; tRegime=TRG_TRANS; tAge=TA_YOUNG; tAgeBars=0;
+      tHealth=TH_NORMAL; chop=50.0; vwap=0; speed=0;
+      nZones=0; atZone=-1; nHi=0; nLo=0;
+      legLow=0; legHigh=0; legDir=0;
+     }
+
+   void ZeroDecl()
+     {
+      decl.active=false; decl.tfSlot=slot; decl.dir=0; decl.tDeclare=0;
+      decl.branch=""; decl.entry=0; decl.sl=0; decl.tp1=0; decl.tp2=0;
+      decl.lots=0; decl.durBars=0; decl.timeStop=0; decl.beLevel=0;
+      decl.partialLevel=0; decl.outcome=DO_ACTIVE; decl.barsAge=0; decl.beArmed=false;
+     }
+
+   double Body(int i)      { return(MathAbs(r[i].close - r[i].open)); }
+   double Rng(int i)       { return(r[i].high - r[i].low); }
+   double UpW(int i)       { return(r[i].high - MathMax(r[i].open, r[i].close)); }
+   double LoW(int i)       { return(MathMin(r[i].open, r[i].close) - r[i].low); }
+
+   //------------------------------------------------------------------
+   // data load
+   //------------------------------------------------------------------
+   bool Load()
+     {
+      ready = false;
+      int available = Bars(_Symbol, tf);
+      if(available < BARS_MIN)
+         return(false);
+      int want = MathMin(BARS_WANT, available - 2);
+      ArraySetAsSeries(r,   true);
+      ArraySetAsSeries(e20, true);
+      ArraySetAsSeries(e50, true);
+      ArraySetAsSeries(atr, true);
+      ArraySetAsSeries(v,   true);
+      n = CopyRates(_Symbol, tf, 0, want, r);
+      if(n < BARS_MIN)
+         return(false);
+      if(CopyBuffer(hE20, 0, 0, n, e20) < n) return(false);
+      if(CopyBuffer(hE50, 0, 0, n, e50) < n) return(false);
+      if(CopyBuffer(hATR, 0, 0, n, atr) < n) return(false);
+      if(CopyTickVolume(_Symbol, tf, 0, n, v) < n) return(false);
+
+      double sum=0; int cnt=0;
+      for(int i=1; i<=20 && i<n-1; i++) { sum += (double)v[i]; cnt++; }
+      volAvg = (cnt>0 ? sum/cnt : 0);
+
+      double sp=0; int sc=0;
+      for(int i=1; i<=50 && i<n-2; i++) { sp += MathAbs(r[i].close - r[i+1].close); sc++; }
+      speed = (sc>0 ? sp/sc : 0);
+      if(speed <= 0 && n>2) speed = MathMax(atr[1]*0.25, _Point);
+
+      ready = true;
+      return(true);
+     }
+
+   //------------------------------------------------------------------
+   // Step 1a: swing structure (the eyes) - ATR-adaptive pivots
+   //------------------------------------------------------------------
+   void DetectSwings()
+     {
+      ArrayResize(swHiP, 0); ArrayResize(swHiB, 0);
+      ArrayResize(swLoP, 0); ArrayResize(swLoB, 0);
+      nHi=0; nLo=0;
+
+      double sig = g_pr.swingSig;
+      int pT[];  double pP[];  int pB[];
+      ArrayResize(pT,0); ArrayResize(pP,0); ArrayResize(pB,0);
+      int np=0;
+
+      for(int i=2; i<=n-3; i++)
+        {
+         double a = (atr[i] > 0 ? atr[i] : _Point);
+         bool ph = r[i].high > r[i-1].high && r[i].high > r[i-2].high &&
+                   r[i].high > r[i+1].high && r[i].high > r[i+2].high &&
+                   (r[i].high - MathMax(r[i-1].high, r[i-2].high)) >= sig*a &&
+                   (r[i].high - MathMax(r[i+1].high, r[i+2].high)) >= sig*a;
+         bool pl = r[i].low < r[i-1].low && r[i].low < r[i-2].low &&
+                   r[i].low < r[i+1].low && r[i].low < r[i+2].low &&
+                   (MathMin(r[i-1].low, r[i-2].low) - r[i].low) >= sig*a &&
+                   (MathMin(r[i+1].low, r[i+2].low) - r[i].low) >= sig*a;
+         if(!ph && !pl) continue;
+         ArrayResize(pT, np+1); ArrayResize(pP, np+1); ArrayResize(pB, np+1);
+         pT[np] = (ph ? 1 : -1);
+         pP[np] = (ph ? r[i].high : r[i].low);
+         pB[np] = i;
+         np++;
+        }
+
+      // enforce alternation, oldest -> newest (pivots collected newest-first)
+      double seqP[]; int seqT[]; int seqB[];
+      ArrayResize(seqP,0); ArrayResize(seqT,0); ArrayResize(seqB,0);
+      int cnt=0, lastType=0;
+      for(int k=np-1; k>=0; k--)
+        {
+         int t = pT[k];
+         if(lastType==0 || t != lastType)
+           {
+            ArrayResize(seqP,cnt+1); ArrayResize(seqT,cnt+1); ArrayResize(seqB,cnt+1);
+            seqP[cnt]=pP[k]; seqT[cnt]=t; seqB[cnt]=pB[k];
+            lastType=t; cnt++;
+           }
+         else
+           {
+            if(t>0 && pP[k] > seqP[cnt-1]) { seqP[cnt-1]=pP[k]; seqB[cnt-1]=pB[k]; }
+            if(t<0 && pP[k] < seqP[cnt-1]) { seqP[cnt-1]=pP[k]; seqB[cnt-1]=pB[k]; }
+           }
+        }
+
+      // newest first: seq[cnt-1] is newest
+      for(int k=cnt-1; k>=0; k--)
+        {
+         if(seqT[k] > 0 && nHi < 10)
+           {
+            ArrayResize(swHiP, nHi+1); ArrayResize(swHiB, nHi+1);
+            swHiP[nHi]=seqP[k]; swHiB[nHi]=seqB[k]; nHi++;
+           }
+         if(seqT[k] < 0 && nLo < 10)
+           {
+            ArrayResize(swLoP, nLo+1); ArrayResize(swLoB, nLo+1);
+            swLoP[nLo]=seqP[k]; swLoB[nLo]=seqB[k]; nLo++;
+           }
+        }
+
+      // fib leg = last two alternating pivots
+      legDir = 0; legLow=0; legHigh=0;
+      if(cnt >= 2)
+        {
+         int newestT = seqT[cnt-1];
+         double newestP = seqP[cnt-1];
+         double prevP   = seqP[cnt-2];
+         if(newestT > 0) { legDir=1;  legHigh=newestP; legLow=prevP; }
+         if(newestT < 0) { legDir=-1; legLow=newestP;  legHigh=prevP; }
+        }
+     }
+
+   //------------------------------------------------------------------
+   // Step 1b: trend verdict + VWAP + CHOP
+   //------------------------------------------------------------------
+   void ComputeTrend()
+     {
+      double c1 = r[1].close;
+
+      //--- structure (HH/HL vs LH/LL)
+      int sdir = 0;
+      if(nHi>=2 && nLo>=2)
+        {
+         if(swHiP[0] > swHiP[1] && swLoP[0] > swLoP[1]) sdir =  1;
+         if(swHiP[0] < swHiP[1] && swLoP[0] < swLoP[1]) sdir = -1;
+        }
+
+      //--- EMA confirmation
+      int edir = 0;
+      if(e20[1] > e50[1] && c1 > e50[1]) edir =  1;
+      if(e20[1] < e50[1] && c1 < e50[1]) edir = -1;
+
+      //--- confidence: structure is the boss, EMA confirms
+      int prevDir = tDir;                      // remember previous read for flip/age tracking
+      if(sdir == 0)                            tConf = TC_WEAK;
+      else if(sdir == edir)                    tConf = TC_STRONG;
+      else if(edir == 0)                       tConf = TC_MOD;
+      else                                     tConf = TC_WEAK;   // tools contradict the eyes
+      tDir = sdir;
+
+      //--- choppiness regime
+      int per = MathMin(14, n-2);
+      double hh = r[1].high, ll = r[1].low, sumA = 0;
+      for(int i=1; i<=per; i++)
+        {
+         if(r[i].high > hh) hh = r[i].high;
+         if(r[i].low  < ll) ll = r[i].low;
+         sumA += atr[i];
+        }
+      double rng = hh - ll;
+      chop = (rng > 0 && per > 0 ? 100.0*MathLog10(sumA/rng)/MathLog10((double)per) : 50.0);
+      if(chop >= CHOP_BOX)      tRegime = TRG_BOX;
+      else if(chop <= CHOP_TREND) tRegime = TRG_TREND;
+      else                        tRegime = TRG_TRANS;
+
+      //--- age (structure flip tracking)
+      if(sdir != 0)
+        {
+         if(sdir != prevDir) tAgeBars = 1;
+         else tAgeBars++;
+         if(tAgeBars <= 30)      tAge = TA_YOUNG;
+         else if(tAgeBars <= 80) tAge = TA_MATURE;
+         else                    tAge = TA_OLD;
+        }
+      else { tAgeBars = 0; tAge = TA_YOUNG; }
+
+      //--- health: pullback depth vs last leg
+      tHealth = TH_NORMAL;
+      if(tDir > 0 && nHi>=1 && nLo>=1 && swHiP[0] > swLoP[0])
+        {
+         double depth = (swHiP[0] - c1) / (swHiP[0] - swLoP[0]);
+         if(depth < FIB_R1)      tHealth = TH_SHALLOW;
+         else if(depth < FIB_R3) tHealth = TH_NORMAL;
+         else                    tHealth = TH_DEEP;
+        }
+      if(tDir < 0 && nHi>=1 && nLo>=1 && swHiP[0] > swLoP[0])
+        {
+         double depth = (c1 - swLoP[0]) / (swHiP[0] - swLoP[0]);
+         if(depth < FIB_R1)      tHealth = TH_SHALLOW;
+         else if(depth < FIB_R3) tHealth = TH_NORMAL;
+         else                    tHealth = TH_DEEP;
+        }
+
+      //--- VWAP (session day, server time)
+      datetime now = TimeCurrent();
+      datetime dayStart = (datetime)((long)now - ((long)now % 86400));
+      double tpv=0, vv=0;
+      for(int i=1; i<n; i++)
+        {
+         if(r[i].time < dayStart) break;
+         double tp = (r[i].high + r[i].low + r[i].close) / 3.0;   // typical price
+         tpv += tp * (double)v[i];
+         vv  += (double)v[i];
+        }
+      vwap = (vv > 0 ? tpv/vv : c1);
+
+      //--- trend line text
+      string dirTxt = (tDir>0 ? "UP" : (tDir<0 ? "DOWN" : "SIDEWAYS"));
+      string confTxt = (tConf==TC_STRONG ? "strong" : (tConf==TC_MOD ? "moderate" : "weak"));
+      string ageTxt  = (tAge==TA_YOUNG ? "young" : (tAge==TA_MATURE ? "mature" : "old"));
+      string regTxt  = (tRegime==TRG_TREND ? "trending" : (tRegime==TRG_BOX ? "box" : "transition"));
+      string hlTxt   = (tHealth==TH_SHALLOW ? "pullback shallow" :
+                        (tHealth==TH_NORMAL ? "pullback normal" : "pullback deep - watch"));
+      trendLine = dirTxt + " " + confTxt + " " + ageTxt + " | " + regTxt +
+                  " (chop " + DoubleToString(chop,1) + ") | " + hlTxt;
+     }
+
+   //------------------------------------------------------------------
+   // Step 2: precision map
+   //------------------------------------------------------------------
+   void ZoneTagsText(int tags, string &txt)
+     {
+      txt = "";
+      if((tags & ZG_SWING)  != 0) txt += "swing ";
+      if((tags & ZG_LIFE)   != 0) txt += "lifeline ";
+      if((tags & ZG_SESS)   != 0) txt += "session ";
+      if((tags & ZG_ROUND)  != 0) txt += "round ";
+      if((tags & ZG_FIB)    != 0) txt += "fib ";
+      if((tags & ZG_VWAP)   != 0) txt += "vwap ";
+      if((tags & ZG_BROKEN) != 0) txt += "flipped ";
+      StringTrimRight(txt);
+     }
+
+   void AddCandidate(double price, int tag, double &cp[], int &ct[], int &cn)
+     {
+      if(price <= 0) return;
+      for(int i=0; i<cn; i++)
+        {
+         if(MathAbs(cp[i] - price) < _Point*0.5)   // same price, merge tags
+           { ct[i] |= tag; return; }
+        }
+      ArrayResize(cp, cn+1); ArrayResize(ct, cn+1);
+      cp[cn]=price; ct[cn]=tag; cn++;
+     }
+
+   void BuildMap()
+     {
+      double thick = g_pr.zoneATR * atr[1];
+      if(thick <= 0) thick = _Point*10;
+      double c1 = r[1].close;
+      double buf = g_pr.breakBuf * atr[1];
+
+      //--- gather candidates
+      double cp[]; int ct[]; int cn=0;
+      ArrayResize(cp,0); ArrayResize(ct,0);
+
+      for(int i=0; i<nHi && i<5; i++) AddCandidate(swHiP[i], ZG_SWING, cp, ct, cn);
+      for(int i=0; i<nLo && i<5; i++) AddCandidate(swLoP[i], ZG_SWING, cp, ct, cn);
+
+      // lifeline: last HL in up-trend / last LH in down-trend
+      double lifePrice = 0;
+      if(tDir > 0 && nLo>=1) { lifePrice = swLoP[0]; AddCandidate(lifePrice, ZG_LIFE, cp, ct, cn); }
+      if(tDir < 0 && nHi>=1) { lifePrice = swHiP[0]; AddCandidate(lifePrice, ZG_LIFE, cp, ct, cn); }
+
+      // session extremes (today, server time)
+      datetime now = TimeCurrent();
+      datetime dayStart = (datetime)((long)now - ((long)now % 86400));
+      double dHi=0, dLo=0; bool hasDay=false;
+      for(int i=1; i<n; i++)
+        {
+         if(r[i].time < dayStart) break;
+         if(!hasDay) { dHi=r[i].high; dLo=r[i].low; hasDay=true; }
+         if(r[i].high > dHi) dHi = r[i].high;
+         if(r[i].low  < dLo) dLo = r[i].low;
+        }
+      if(hasDay)
+        {
+         if(MathAbs(dHi - c1) < 6*atr[1]) AddCandidate(dHi, ZG_SESS, cp, ct, cn);
+         if(MathAbs(dLo - c1) < 6*atr[1]) AddCandidate(dLo, ZG_SESS, cp, ct, cn);
+        }
+      // Asian range (forex profile only)
+      if(g_pr.asianRange)
+        {
+         datetime aEnd = (datetime)((long)dayStart + (long)g_pr.asianEndHour*3600);
+         if(now > aEnd)
+           {
+            double aHi=0, aLo=0; bool hasA=false;
+            for(int i=1; i<n; i++)
+              {
+               if(r[i].time < dayStart) break;
+               if(r[i].time >= aEnd) continue;
+               if(!hasA) { aHi=r[i].high; aLo=r[i].low; hasA=true; }
+               if(r[i].high > aHi) aHi = r[i].high;
+               if(r[i].low  < aLo) aLo = r[i].low;
+              }
+            if(hasA)
+              {
+               if(MathAbs(aHi - c1) < 4*atr[1]) AddCandidate(aHi, ZG_SESS, cp, ct, cn);
+               if(MathAbs(aLo - c1) < 4*atr[1]) AddCandidate(aLo, ZG_SESS, cp, ct, cn);
+              }
+           }
+        }
+
+      // round numbers (per symbol type grid)
+      if(g_pr.roundGrid > 0)
+        {
+         double g = g_pr.roundGrid;
+         double above = (MathFloor(c1/g)+1.0)*g;
+         double below = (MathFloor(c1/g))*g;
+         if(MathAbs(above - c1) < 4*atr[1]) AddCandidate(above, ZG_ROUND, cp, ct, cn);
+         if(MathAbs(below - c1) < 4*atr[1]) AddCandidate(below, ZG_ROUND, cp, ct, cn);
+        }
+      if(g_pr.roundGrid2 > 0)
+        {
+         double g2 = g_pr.roundGrid2;
+         double above2 = (MathFloor(c1/g2)+1.0)*g2;
+         double below2 = (MathFloor(c1/g2))*g2;
+         if(MathAbs(above2 - c1) < 3*atr[1]) AddCandidate(above2, ZG_ROUND, cp, ct, cn);
+         if(MathAbs(below2 - c1) < 3*atr[1]) AddCandidate(below2, ZG_ROUND, cp, ct, cn);
+        }
+
+      // fib pause-zones of the last completed leg (measured, with structure)
+      if(legDir != 0 && legHigh > legLow)
+        {
+         double size = legHigh - legLow;
+         if(legDir > 0)
+           {
+            AddCandidate(legHigh - FIB_R1*size, ZG_FIB, cp, ct, cn);
+            AddCandidate(legHigh - FIB_R2*size, ZG_FIB, cp, ct, cn);
+            AddCandidate(legHigh - FIB_R3*size, ZG_FIB, cp, ct, cn);
+           }
+         else
+           {
+            AddCandidate(legLow + FIB_R1*size, ZG_FIB, cp, ct, cn);
+            AddCandidate(legLow + FIB_R2*size, ZG_FIB, cp, ct, cn);
+            AddCandidate(legLow + FIB_R3*size, ZG_FIB, cp, ct, cn);
+           }
+        }
+
+      //--- cluster candidates into zones
+      double clusterDist = 0.6*thick;
+      SZone tmp[];
+      int nz=0;
+      ArrayResize(tmp, 0);
+      // sort candidates by price (insertion sort, small n)
+      for(int i=1; i<cn; i++)
+        {
+         double kp=cp[i]; int kt=ct[i];
+         int j=i-1;
+         while(j>=0 && cp[j]>kp) { cp[j+1]=cp[j]; ct[j+1]=ct[j]; j--; }
+         cp[j+1]=kp; ct[j+1]=kt;
+        }
+      for(int i=0; i<cn; i++)
+        {
+         if(nz>0 && MathAbs(tmp[nz-1].price - cp[i]) <= clusterDist)
+           {
+            // merge into previous zone
+            tmp[nz-1].price = (tmp[nz-1].price + cp[i])*0.5;
+            tmp[nz-1].tags |= ct[i];
+           }
+         else
+           {
+            ArrayResize(tmp, nz+1);
+            tmp[nz].price = cp[i];
+            tmp[nz].thick = thick;
+            tmp[nz].tags  = ct[i];
+            tmp[nz].touches=0; tmp[nz].drama=0; tmp[nz].recencyF=0.3;
+            tmp[nz].strength=0; tmp[nz].slForBuy=0; tmp[nz].slForSell=0;
+            tmp[nz].isLifeline=false; tmp[nz].brokenDir=0;
+            nz++;
+           }
+        }
+
+      //--- grade zones: touches, drama, recency, vwap/stack, flip rule
+      for(int z=0; z<nz; z++)
+        {
+         double zLo = tmp[z].price - thick;
+         double zHi = tmp[z].price + thick;
+         int touches=0; double drama=0; int newestTouch=0;
+         // swing pivots touching the zone
+         for(int i=0; i<nHi; i++)
+            if(swHiP[i] >= zLo && swHiP[i] <= zHi)
+              {
+               touches++;
+               double ratio = (volAvg>0 ? (double)v[swHiB[i]]/volAvg : 1);
+               drama += MathMin(ratio, 3.0);
+               if(swHiB[i] > newestTouch) newestTouch = swHiB[i];
+              }
+         for(int i=0; i<nLo; i++)
+            if(swLoP[i] >= zLo && swLoP[i] <= zHi)
+              {
+               touches++;
+               double ratio = (volAvg>0 ? (double)v[swLoB[i]]/volAvg : 1);
+               drama += MathMin(ratio, 3.0);
+               if(swLoB[i] > newestTouch) newestTouch = swLoB[i];
+              }
+         tmp[z].touches = touches;
+         tmp[z].drama   = (touches>0 ? drama/touches : 0);
+         tmp[z].recencyF= (touches>0 ? MathMax(0.1, 1.0 - (double)newestTouch/300.0) : 0.2);
+         if(MathAbs(vwap - tmp[z].price) <= thick) tmp[z].tags |= ZG_VWAP;
+
+         // flip rule: decisively closed beyond within last 10 bars?
+         tmp[z].brokenDir = 0;
+         for(int j=1; j<=10 && j<n-1; j++)
+           {
+            if(r[j].close > zHi) { tmp[z].brokenDir = 1; break; }
+            if(r[j].close < zLo) { tmp[z].brokenDir = -1; break; }
+           }
+         if(tmp[z].brokenDir != 0) tmp[z].tags |= ZG_BROKEN;
+
+         // lifeline flag
+         tmp[z].isLifeline = ((tmp[z].tags & ZG_LIFE) != 0);
+
+         // strength = touches x drama x recency + stack-bonus
+         int stack = 0;
+         int t = tmp[z].tags;
+         if((t & ZG_SWING) != 0) stack++;
+         if((t & ZG_LIFE)  != 0) stack++;
+         if((t & ZG_SESS)  != 0) stack++;
+         if((t & ZG_ROUND) != 0) stack++;
+         if((t & ZG_FIB)   != 0) stack++;
+         if((t & ZG_VWAP)  != 0) stack++;
+         double s = 40.0*MathMin(touches,4)/4.0
+                  + 25.0*MathMin(tmp[z].drama,2.0)/2.0
+                  + 20.0*tmp[z].recencyF
+                  + 15.0*MathMin(stack-1, 3)/3.0;
+         tmp[z].strength = s;
+
+         // risk lines ("where am I wrong")
+         tmp[z].slForBuy  = tmp[z].price - thick - buf;
+         tmp[z].slForSell = tmp[z].price + thick + buf;
+
+         ZoneTagsText(tmp[z].tags, tmp[z].tagStr);
+        }
+
+      //--- keep strongest maxZones with at least one meaningful tag
+      //    (drop naked low-strength candidates)
+      int keep = 0;
+      for(int z=0; z<nz; z++)
+         if(tmp[z].strength >= 25.0 || tmp[z].isLifeline)
+           {
+            if(keep != z) tmp[keep] = tmp[z];
+            keep++;
+           }
+      nz = keep;
+      // selection sort by strength desc, keep top maxZones
+      for(int i=0; i<nz-1; i++)
+        {
+         int best=i;
+         for(int j=i+1; j<nz; j++) if(tmp[j].strength > tmp[best].strength) best=j;
+         if(best!=i) { SZone tz=tmp[i]; tmp[i]=tmp[best]; tmp[best]=tz; }
+        }
+      nZones = MathMin(nz, g_pr.maxZones);
+      ArrayResize(zones, nZones);
+      for(int z=0; z<nZones; z++) zones[z] = tmp[z];
+
+      //--- price location (the primary gate)
+      atZone = -1;
+      for(int z=0; z<nZones; z++)
+         if(MathAbs(c1 - zones[z].price) <= thick) { atZone = z; break; }
+
+      int resIdx=-1, supIdx=-1;
+      double dRes=0, dSup=0;
+      for(int z=0; z<nZones; z++)
+        {
+         if(zones[z].price > c1 + thick && (resIdx<0 || zones[z].price < dRes))
+           { resIdx=z; dRes=zones[z].price; }
+         if(zones[z].price < c1 - thick && (supIdx<0 || zones[z].price > dSup))
+           { supIdx=z; dSup=zones[z].price; }
+        }
+      if(atZone >= 0)
+         locLine = "price AT zone " + DoubleToString(zones[atZone].price, _Digits) +
+                   " [" + zones[atZone].tagStr + "]";
+      else if(resIdx>=0 && supIdx>=0)
+         locLine = "between zones: res " + DoubleToString(dRes,_Digits) + " / sup " +
+                   DoubleToString(dSup,_Digits);
+      else
+         locLine = "no zones nearby - standing aside";
+     }
+
+   //------------------------------------------------------------------
+   // Step 3: the verdict - living scenario tree
+   //------------------------------------------------------------------
+   int EstBars(double dist)
+     {
+      double sp = (speed > 0 ? speed : atr[1]*0.25);
+      int b = (int)MathCeil(dist / MathMax(sp, _Point));
+      int cap = 3*StallBars();
+      if(b < 2)   b = 2;
+      if(b > cap) b = cap;
+      return(b);
+     }
+
+   int StallBars()
+     {
+      return(tf==PERIOD_M5 ? g_pr.stallM5 : g_pr.stallM15);
+     }
+
+   void SetBranch(int idx, string name, int dir, double t1, double t2, double inv, int bars)
+     {
+      br[idx].used    = true;
+      br[idx].name    = name;
+      br[idx].dir     = dir;
+      br[idx].target1 = t1;
+      br[idx].target2 = t2;
+      br[idx].invalid = inv;
+      br[idx].bars    = bars;
+      br[idx].status  = BR_WAIT;
+     }
+
+   void BuildTree()
+     {
+      double c1 = r[1].close;
+      double a  = atr[1];
+      double buf = g_pr.breakBuf * a;
+
+      // nearest zones around price
+      int resIdx=-1, supIdx=-1, res2Idx=-1, sup2Idx=-1;
+      for(int z=0; z<nZones; z++)
+        {
+         if(zones[z].price > c1 + zones[z].thick)
+           {
+            if(resIdx<0 || zones[z].price < zones[resIdx].price)
+              { res2Idx=resIdx; resIdx=z; }
+            else if(res2Idx<0 || zones[z].price < zones[res2Idx].price)
+              res2Idx=z;
+           }
+         if(zones[z].price < c1 - zones[z].thick)
+           {
+            if(supIdx<0 || zones[z].price > zones[supIdx].price)
+              { sup2Idx=supIdx; supIdx=z; }
+            else if(sup2Idx<0 || zones[z].price > zones[sup2Idx].price)
+              sup2Idx=z;
+           }
+        }
+
+      double ext1=0, ext2=0;
+      if(legDir != 0 && legHigh > legLow)
+        {
+         double size = legHigh - legLow;
+         if(legDir > 0) { ext1 = legLow + FIB_E1*size; ext2 = legLow + FIB_E2*size; }
+         else           { ext1 = legHigh - FIB_E1*size; ext2 = legHigh - FIB_E2*size; }
+        }
+
+      if(tDir > 0)
+        {
+         double t1 = (resIdx>=0 ? zones[resIdx].price : (ext1>0 ? ext1 : c1 + 2*a));
+         double t2 = (ext1>0 && ext1>t1 ? ext1 : (ext2>0 ? ext2 : t1 + (t1-c1)));
+         if(resIdx>=0 && ext1>0 && ext1>t1) t2 = ext1;
+         double inv = (supIdx>=0 ? zones[supIdx].slForBuy : c1 - 2.5*a);
+         SetBranch(0, "base: UP continuation", 1, t1, t2, inv, EstBars(t1-c1));
+         double a1 = (supIdx>=0 ? zones[supIdx].price : c1 - 1.5*a);
+         double a2 = (sup2Idx>=0 ? zones[sup2Idx].price : a1 - (t1-c1)*0.8);
+         double aInv = (resIdx>=0 ? zones[resIdx].slForSell : c1 + 2.5*a);
+         SetBranch(1, "alt: reversal at resistance", -1, a1, a2, aInv, EstBars(c1-a1));
+        }
+      else if(tDir < 0)
+        {
+         double t1 = (supIdx>=0 ? zones[supIdx].price : (ext1>0 ? ext1 : c1 - 2*a));
+         double t2 = (ext1>0 && ext1<t1 ? ext1 : (ext2>0 ? ext2 : t1 - (c1-t1)));
+         if(supIdx>=0 && ext1>0 && ext1<t1) t2 = ext1;
+         double inv = (resIdx>=0 ? zones[resIdx].slForSell : c1 + 2.5*a);
+         SetBranch(0, "base: DOWN continuation", -1, t1, t2, inv, EstBars(c1-t1));
+         double a1 = (resIdx>=0 ? zones[resIdx].price : c1 + 1.5*a);
+         double a2 = (res2Idx>=0 ? zones[res2Idx].price : a1 + (c1-t1)*0.8);
+         double aInv = (supIdx>=0 ? zones[supIdx].slForBuy : c1 - 2.5*a);
+         SetBranch(1, "alt: reversal at support", 1, a1, a2, aInv, EstBars(a1-c1));
+        }
+      else
+        {
+         // sideways: fade toward the opposite edge / break beyond nearer edge
+         int nearIdx=-1; double nearD=0;
+         for(int z=0; z<nZones; z++)
+           {
+            double d = MathAbs(zones[z].price - c1);
+            if(nearIdx<0 || d<nearD) { nearIdx=z; nearD=d; }
+           }
+         if(nearIdx>=0)
+           {
+            bool nearAbove = zones[nearIdx].price > c1;
+            int fdir = (nearAbove ? -1 : 1);
+            double far = c1;
+            for(int z=0; z<nZones; z++)
+               if(z!=nearIdx && ((fdir>0 && zones[z].price>c1) || (fdir<0 && zones[z].price<c1)))
+                 { far = zones[z].price; break; }
+            if(far==c1) far = c1 + fdir*2*a;
+            SetBranch(0, "base: range fade at zone edge", fdir, far, far + fdir*(far-c1)*0.5,
+                      zones[nearIdx].price + (nearAbove ? zones[nearIdx].thick + buf : -(zones[nearIdx].thick + buf)),
+                      EstBars(MathAbs(far-c1)));
+            SetBranch(1, "alt: break of range edge", (nearAbove ? 1 : -1),
+                      zones[nearIdx].price + (nearAbove ? 1 : -1)*(zones[nearIdx].thick + buf),
+                      zones[nearIdx].price + (nearAbove ? 1 : -1)*(2*zones[nearIdx].thick + 2*buf),
+                      zones[nearIdx].price - (nearAbove ? 1 : -1)*(zones[nearIdx].thick),
+                      EstBars(zones[nearIdx].thick));
+           }
+         else
+           {
+            SetBranch(0, "base: no map - drift", 0, c1, c1, c1, StallBars());
+            SetBranch(1, "alt: none", 0, c1, c1, c1, StallBars());
+           }
+        }
+
+      // stall branch always last
+      SetBranch(2, "stall: no significant move - tree rebuilt", 0, c1, c1, 0, StallBars());
+
+      // tracking marker: which branch price currently behaves like
+      double m = r[1].close - r[3].close;
+      trackLine = "tracking: stall";
+      if(MathAbs(m) >= 0.15*a)
+        {
+         int md = (m>0 ? 1 : -1);
+         for(int b=0; b<2; b++)
+            if(br[b].used && br[b].dir == md)
+              { trackLine = "tracking: " + br[b].name; break; }
+        }
+     }
+
+   //------------------------------------------------------------------
+   // Step 4a: track the active declaration (outcome bookkeeping)
+   //------------------------------------------------------------------
+   void TrackDecl()
+     {
+      if(!decl.active) return;
+      decl.barsAge++;
+      if(decl.outcome==DO_ACTIVE || decl.outcome==DO_TP1)
+        {
+         if(decl.dir > 0)
+           {
+            if(decl.outcome==DO_ACTIVE && r[1].low <= decl.sl)
+              { FinishDecl(DO_SL, "invalidated"); return; }
+            if(r[1].high >= decl.tp2)
+              { FinishDecl(DO_TP2, "TP2 hit"); return; }
+            if(decl.outcome==DO_ACTIVE && r[1].high >= decl.tp1)
+              { decl.outcome=DO_TP1; decl.beArmed=true; OnDeclared("partial TP1 hit - BE armed"); return; }
+            if(decl.outcome==DO_TP1 && decl.beArmed && r[1].low <= decl.entry)
+              { FinishDecl(DO_SL, "stopped at BE after partial"); return; }
+           }
+         else
+           {
+            if(decl.outcome==DO_ACTIVE && r[1].high >= decl.sl)
+              { FinishDecl(DO_SL, "invalidated"); return; }
+            if(r[1].low <= decl.tp2)
+              { FinishDecl(DO_TP2, "TP2 hit"); return; }
+            if(decl.outcome==DO_ACTIVE && r[1].low <= decl.tp1)
+              { decl.outcome=DO_TP1; decl.beArmed=true; OnDeclared("partial TP1 hit - BE armed"); return; }
+            if(decl.outcome==DO_TP1 && decl.beArmed && r[1].high >= decl.entry)
+              { FinishDecl(DO_SL, "stopped at BE after partial"); return; }
+           }
+         if(decl.barsAge >= decl.timeStop)
+           { FinishDecl(DO_TIMEOUT, "timed out (time-stop)"); return; }
+        }
+     }
+
+   void FinishDecl(int outcome, string note)
+     {
+      decl.outcome = outcome;
+      decl.active  = false;
+      PushMemory(decl, note + " (" + tfName + " " + TimeToString(TimeCurrent(), TIME_MINUTES) + ")");
+      OnDeclared("declaration " + note);
+     }
+
+   //------------------------------------------------------------------
+   // Step 4b: detect the selector candle at a zone -> declare
+   //------------------------------------------------------------------
+   void DetectAndDeclare()
+     {
+      double a = atr[1];
+      if(a <= 0) return;
+      double body1 = Body(1), body2 = Body(2);
+
+      int bestZone=-1; double bestScore=0; int bestEvent=0; // 1 rej 2 flip 3 decisive 4 false
+      int bestDir=0;
+
+      for(int z=0; z<nZones; z++)
+        {
+         if(zones[z].strength < 30.0) continue;          // faded zone - not trusted
+         double zp = zones[z].price, tk = zones[z].thick;
+         bool touch = (r[1].high >= zp - tk) && (r[1].low <= zp + tk);
+         if(!touch) continue;
+
+         bool aboveZone = r[1].close > zp + tk;
+         bool belowZone = r[1].close < zp - tk;
+
+         // --- false break (trap): poked through, closed back inside
+         if(r[1].high > zp + tk && r[1].close < zp + tk && UpW(1) >= 0.4*a)
+           { if(zones[z].strength > bestScore){ bestScore=zones[z].strength; bestZone=z; bestEvent=4; bestDir=-1; } continue; }
+         if(r[1].low < zp - tk && r[1].close > zp - tk && LoW(1) >= 0.4*a)
+           { if(zones[z].strength > bestScore){ bestScore=zones[z].strength; bestZone=z; bestEvent=4; bestDir=1; } continue; }
+
+         // --- decisive break: full close beyond the zone
+         if(aboveZone && Body(1) >= 0.5*a)
+           { if(zones[z].strength > bestScore){ bestScore=zones[z].strength; bestZone=z; bestEvent=3; bestDir=1; } continue; }
+         if(belowZone && Body(1) >= 0.5*a)
+           { if(zones[z].strength > bestScore){ bestScore=zones[z].strength; bestZone=z; bestEvent=3; bestDir=-1; } continue; }
+
+         // --- rejection: pierced, closed back with dominant wick
+         if(r[1].low <= zp && r[1].close > zp && LoW(1) >= 1.2*MathMax(body1,_Point) && LoW(1) >= 0.3*a)
+           { if(zones[z].strength > bestScore){ bestScore=zones[z].strength; bestZone=z; bestEvent=1; bestDir=1; } continue; }
+         if(r[1].high >= zp && r[1].close < zp && UpW(1) >= 1.2*MathMax(body1,_Point) && UpW(1) >= 0.3*a)
+           { if(zones[z].strength > bestScore){ bestScore=zones[z].strength; bestZone=z; bestEvent=1; bestDir=-1; } continue; }
+
+         // --- dominance flip: body engulfs previous opposite body at the zone
+         if(body1 > body2 && body1 >= 0.4*a &&
+            ((r[1].close > r[1].open && r[2].close < r[2].open &&
+              r[1].close >= r[2].open && r[1].open <= r[2].close) ||
+             (r[1].close < r[1].open && r[2].close > r[2].open &&
+              r[1].close <= r[2].open && r[1].open >= r[2].close)))
+           { if(zones[z].strength > bestScore){ bestScore=zones[z].strength; bestZone=z; bestEvent=2;
+                bestDir = (r[1].close > r[1].open ? 1 : -1); } continue; }
+        }
+
+      if(bestZone < 0) return;                          // noise filter: nothing declared
+
+      // one idea at a time per timeframe
+      if(decl.active)
+        {
+         if(decl.dir == bestDir)
+           { OnDeclared("selector matched active declaration - kept"); return; }
+         decl.outcome = DO_SUPERSEDE;
+         decl.active = false;
+         PushMemory(decl, "superseded by new selector (" + tfName + " " +
+                    TimeToString(TimeCurrent(), TIME_MINUTES) + ")");
+        }
+
+      SZone z = zones[bestZone];
+      int d = bestDir;
+      double entry = r[1].close;
+      double sl = (d > 0 ? z.slForBuy : z.slForSell);
+      if(d > 0 && r[1].low - 0.1*a < sl) sl = r[1].low - 0.1*a;      // never inside the trigger bar
+      if(d < 0 && r[1].high + 0.1*a > sl) sl = r[1].high + 0.1*a;
+      double slDist = MathAbs(entry - sl);
+      if(slDist < 2.0 * (double)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) * _Point)
+        { OnDeclared("selector rejected: stop tighter than 2x spread"); return; }
+
+      // targets from the CURRENT map (pencil -> ink: tree/zone data is fresh)
+      double tp1 = 0, tp2 = 0;
+      if(d > 0)
+        {
+         for(int zz=0; zz<nZones; zz++)
+            if(zones[zz].price > entry + z.thick && (tp1==0 || zones[zz].price < tp1))
+               tp1 = zones[zz].price;
+         double ext1 = (legDir>0 && legHigh>legLow ? legLow + FIB_E1*(legHigh-legLow) : 0);
+         double ext2 = (legDir>0 && legHigh>legLow ? legLow + FIB_E2*(legHigh-legLow) : 0);
+         if(tp1==0 && ext1>entry) tp1 = ext1;
+         if(tp1==0) tp1 = entry + 1.5*slDist;
+         if(tp2==0) tp2 = (ext2 > tp1 ? ext2 : tp1 + 1.0*slDist);
+         if(tp1 < entry + slDist) tp1 = entry + slDist;              // reward >= 1R
+         if(tp2 < tp1 + slDist)   tp2 = tp1 + slDist;
+        }
+      else
+        {
+         for(int zz=0; zz<nZones; zz++)
+            if(zones[zz].price < entry - z.thick && (tp1==0 || zones[zz].price > tp1))
+               tp1 = zones[zz].price;
+         double ext1 = (legDir<0 && legHigh>legLow ? legHigh - FIB_E1*(legHigh-legLow) : 0);
+         double ext2 = (legDir<0 && legHigh>legLow ? legHigh - FIB_E2*(legHigh-legLow) : 0);
+         if(tp1==0 && ext1>0 && ext1<entry) tp1 = ext1;
+         if(tp1==0) tp1 = entry - 1.5*slDist;
+         if(tp2==0) tp2 = (ext2>0 && ext2<tp1 ? ext2 : tp1 - 1.0*slDist);
+         if(tp1 > entry - slDist) tp1 = entry - slDist;
+         if(tp2 > tp1 - slDist)   tp2 = tp1 - slDist;
+        }
+
+      // duration + management
+      int dur = EstBars(MathAbs(tp1 - entry));
+      int tstop = MathMax(2*dur, StallBars());
+
+      // suggested lot from risk (F5 computation, no user tuning)
+      double lot = SuggestLot(slDist);
+      if(lot <= 0)
+        { OnDeclared("selector rejected: lot could not be computed"); return; }
+
+      // branch linkage for naming
+      string bname = "event-driven";
+      for(int b=0; b<3; b++)
+         if(br[b].used && br[b].dir == d && br[b].status != BR_DEAD)
+           { br[b].status = BR_EXEC; bname = br[b].name; break; }
+
+      decl.active = true;
+      decl.tfSlot = slot;
+      decl.dir = d;
+      decl.tDeclare = r[1].time;
+      decl.branch = bname;
+      decl.entry = entry;
+      decl.sl = sl;
+      decl.tp1 = tp1;
+      decl.tp2 = tp2;
+      decl.lots = lot;
+      decl.durBars = dur;
+      decl.timeStop = tstop;
+      decl.partialLevel = tp1;
+      decl.beLevel = entry;
+      decl.outcome = DO_ACTIVE;
+      decl.barsAge = 0;
+      decl.beArmed = false;
+
+      string evTxt = (bestEvent==1 ? "rejection" : (bestEvent==2 ? "dominance flip" :
+                     (bestEvent==3 ? "decisive break" : "false break (trap)")));
+      OnDeclared("DECLARED " + (d>0?"BUY":"SELL") + " [" + tfName + "] " + bname +
+                 " - " + evTxt + " at zone " + DoubleToString(z.price, _Digits) +
+                 " [" + z.tagStr + " s" + DoubleToString(z.strength,0) + "]" +
+                 " | entry " + DoubleToString(decl.entry,_Digits) +
+                 " SL " + DoubleToString(decl.sl,_Digits) +
+                 " TP1 " + DoubleToString(decl.tp1,_Digits) +
+                 " TP2 " + DoubleToString(decl.tp2,_Digits) +
+                 " lot " + DoubleToString(decl.lots,2) +
+                 " ~" + IntegerToString(decl.durBars) + " bars, time-stop " +
+                 IntegerToString(decl.timeStop));
+     }
+
+   double SuggestLot(double slDist)
+     {
+      double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+      double tickVal  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+      if(tickSize <= 0 || tickVal <= 0 || slDist <= 0) return(0);
+      double lossPerLot = slDist / tickSize * tickVal;
+      if(lossPerLot <= 0) return(0);
+      double riskMoney = AccountInfoDouble(ACCOUNT_BALANCE) * InpRiskPercent / 100.0;
+      double lot = riskMoney / lossPerLot;
+      double lmin = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+      double lmax = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+      double lstep= SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+      if(lstep > 0) lot = MathFloor(lot/lstep)*lstep;
+      if(lot < lmin) lot = lmin;
+      if(lot > lmax) lot = lmax;
+      return(NormalizeDouble(lot, 2));
+     }
+
+   //------------------------------------------------------------------
+   // per-new-bar pipeline
+   //------------------------------------------------------------------
+   void OnNewBar()
+     {
+      datetime t = iTime(_Symbol, tf, 0);
+      if(t == 0 || t == lastBar) return;
+      lastBar = t;
+      if(!Load()) return;
+      DetectSwings();
+      ComputeTrend();
+      BuildMap();
+      BuildTree();
+      TrackDecl();
+      DetectAndDeclare();
+     }
   };
 
 //====================================================================//
 //  GLOBALS                                                           //
 //====================================================================//
 
-int      hEmaFast=INVALID_HANDLE, hEmaSlow=INVALID_HANDLE, hRSI=INVALID_HANDLE;
-int      hATR=INVALID_HANDLE,     hADX=INVALID_HANDLE,     hBands=INVALID_HANDLE;
+CTFBrain g_tf[2];                 // 0 = M5, 1 = M15 (both always computed, F2)
 
-MqlRates g_rates[];
-double   g_emaF[], g_emaS[], g_rsi[];
-double   g_atr[], g_adx[], g_pdi[], g_mdi[];
-double   g_bbUp[], g_bbLo[];
-long     g_vol[];
+string   g_events[8];             // rolling event log, newest first
+int      g_eventN = 0;
 
-int      g_window      = 0;      // copied bars per array
-bool     g_dataOK      = false;
+SDecl    g_mem[6];                // declaration memory (both TFs)
+string   g_memNote[6];
+int      g_memN = 0;
 
-SPattern g_lastPat;              // pattern on last closed bar
-bool     g_hasPat      = false;
-STrend   g_trend;
-SSwings  g_swings;
-SCheck   g_checks[8];
-int      g_checkCount  = 0;
-int      g_score       = 0;
-int      g_maxScore    = 0;
-int      g_setupType   = SETUP_REVERSAL;
-int      g_decision    = DEC_NONE;
-string   g_decisionNote= "";
-
-SPending  g_pend;                // stage-2 candidate waiting for proof
-string    g_pendNote  = "";      // last candidate outcome
-SForecast g_fc;                  // live forecast
-SForecast g_lastDone;            // last resolved forecast
-bool      g_hasDone   = false;
-string    g_recent[MAX_RECENT];  // last outcomes, newest first
-int       g_recentN    = 0;
-int       g_statW=0, g_statL=0, g_statX=0, g_statC=0;
-
-string    g_histNote  = "not scanned yet";
-int       g_histKey   = -1;      // pattern code of last scan
-int       g_histKeyD  = 0;
-int       g_histKeyT  = -1;
-
-datetime  g_lastBar   = 0;
-string    g_statusMsg = "loading history...";
-
-//--- style-driven behaviour (set once in OnInit, per trading style)
-int      g_minScoreValid = 4;
-int      g_minScoreWatch = 3;
-int      g_strongExtra   = 1;
-double   g_slBufATR      = 0.3;
-double   g_slMaxATR      = 2.5;
-double   g_tp1R          = 1.0;   // TP1 as R-multiple of the ACTUAL stop distance
-double   g_tp2R          = 2.0;   // TP2 as R-multiple
-datetime g_cooldownUntil = 0;     // stability: no new forecast before this time
-
-//--- dynamic context: thresholds re-learned from THIS symbol every closed bar
-bool     g_dynOK        = false;
-double   g_rsiLoEff     = 35.0;   // effective limits actually used by validation
-double   g_rsiHiEff     = 65.0;
-double   g_rsiMidEff    = 50.0;
-double   g_adxTrendEff  = 20.0;
-double   g_adxStrongEff = 25.0;
-double   g_volMultEff   = 1.3;
-double   g_atrRatio     = 1.0;    // current ATR vs its own median
-int      g_volRegime    = 0;      // +1 expanding, 0 normal, -1 contracting
-string   g_dynNote      = "thresholds: static (from inputs)";
-
-//--- modern indicator engine (computed over the copied window every closed bar)
-double   g_qqeRsim[];             // QQE smoothed RSI line (series indexed)
-int      g_qqeTrend[];            // QQE trailing-band trend state: +1 up / -1 down
-double   g_fish[];                // Ehlers Fisher Transform (series indexed)
-double   g_chop1         = 50.0;  // Choppiness Index on last closed bar
-bool     g_squeezeOn1    = false; // TTM squeeze ON at last closed bar (BB inside Keltner)
-bool     g_squeezeFired  = false; // squeeze released recently
-int      g_squeezeFiredAgo = -1;
-string   g_squeezeState  = "off";
-
-//====================================================================//
-//  INIT / DEINIT                                                     //
-//====================================================================//
-
-string StyleName()
+void AddEvent(string s)
   {
-   if(InpStyle == ST_CONSERVATIVE) return("Conservative");
-   if(InpStyle == ST_AGGRESSIVE)   return("Aggressive");
-   return("Balanced");
+   for(int i=MathMin(g_eventN,7); i>0; i--) g_events[i] = g_events[i-1];
+   g_events[0] = TimeToString(TimeCurrent(), TIME_MINUTES) + "  " + s;
+   if(g_eventN < 8) g_eventN++;
+   Print("SmartTrader: ", s);
   }
 
-// one human choice -> coherent parameter set (strictness + stop/target profile)
-void ApplyStyle()
+void OnDeclared(string s)          { AddEvent(s); if(InpAlertPopup) Alert("SmartTrader: ", s); }
+
+void PushMemory(const SDecl &d, string note)
   {
-   switch(InpStyle)
-     {
-      case ST_CONSERVATIVE:
-         g_minScoreValid = 5; g_minScoreWatch = 4; g_strongExtra = 1;
-         g_slBufATR = 0.40; g_slMaxATR = 3.0;
-         g_tp1R = 1.5; g_tp2R = 3.0;      // wider targets: fewer, higher-conviction trades
-         break;
-      case ST_AGGRESSIVE:
-         g_minScoreValid = 3; g_minScoreWatch = 3; g_strongExtra = 1;
-         g_slBufATR = 0.25; g_slMaxATR = 2.0;
-         g_tp1R = 0.8; g_tp2R = 1.6;      // quick scalps
-         break;
-      default:                        // balanced
-         g_minScoreValid = 4; g_minScoreWatch = 3; g_strongExtra = 1;
-         g_slBufATR = 0.30; g_slMaxATR = 2.5;
-         g_tp1R = 1.0; g_tp2R = 2.0;      // risk one to make one / two
-     }
+   for(int i=MathMin(g_memN,5); i>0; i--) { g_mem[i]=g_mem[i-1]; g_memNote[i]=g_memNote[i-1]; }
+   g_mem[0]=d; g_memNote[0]=note;
+   if(g_memN < 6) g_memN++;
   }
 
-int OnInit()
+string OutcomeText(int o)
   {
-   if(_Period != PERIOD_M5 && _Period != PERIOD_M15)
-     {
-      Alert("SmartTrader: attach this EA to an M5 or M15 chart only. Current chart: ",
-            EnumToString(_Period));
-      return(INIT_FAILED);
-     }
-
-   hEmaFast = iMA(_Symbol, _Period, EMA_FAST, 0, MODE_EMA, PRICE_CLOSE);
-   hEmaSlow = iMA(_Symbol, _Period, EMA_SLOW, 0, MODE_EMA, PRICE_CLOSE);
-   hRSI     = iRSI(_Symbol, _Period, RSI_PERIOD, PRICE_CLOSE);
-   hATR     = iATR(_Symbol, _Period, ATR_PERIOD);
-   hADX     = iADX(_Symbol, _Period, ADX_PERIOD);
-   hBands   = iBands(_Symbol, _Period, BB_PERIOD, 0, BB_DEV, PRICE_CLOSE);
-
-   if(hEmaFast==INVALID_HANDLE || hEmaSlow==INVALID_HANDLE || hRSI==INVALID_HANDLE ||
-      hATR==INVALID_HANDLE     || hADX==INVALID_HANDLE     || hBands==INVALID_HANDLE)
-     {
-      Print("SmartTrader: failed to create indicator handles, error ", GetLastError());
-      return(INIT_FAILED);
-     }
-
-   ApplyStyle();
-
-   ResetForecast(g_fc);
-   ResetForecast(g_lastDone);
-   for(int i=0; i<MAX_RECENT; i++) g_recent[i]="";
-
-   EventSetTimer(1);
-   Print("SmartTrader v1.50 Phase 1 started on ", _Symbol, " ", EnumToString(_Period),
-         " | style: ", StyleName(),
-         " | dynamic thresholds: ", (InpDynamic ? "ON" : "OFF"),
-         " - market watch & forecast only, no orders will be placed.");
-
-   PanelRender();
-   return(INIT_SUCCEEDED);
-  }
-
-void OnDeinit(const int reason)
-  {
-   EventKillTimer();
-   ObjectsDeleteAll(0, OBJ_PREFIX);
-   ChartRedraw(0);
-   Print("SmartTrader Phase 1 stopped (reason ", reason, ").");
+   if(o==DO_TP1) return("TP1 hit");
+   if(o==DO_TP2) return("TP2 hit");
+   if(o==DO_SL)  return("invalidated");
+   if(o==DO_TIMEOUT) return("timed out");
+   if(o==DO_SUPERSEDE) return("superseded");
+   return("active");
   }
 
 //====================================================================//
-//  EVENT HANDLERS                                                    //
+//  PANELS                                                            //
 //====================================================================//
 
-void OnTick()
+void AddRow(string &rows[], color &cols[], int &n, string s, color c)
   {
-   if(!IsNewBar())
-      return;
-
-   UpdateData();
-   if(!g_dataOK)
-     {
-      PanelRender();
-      return;
-     }
-
-   // 0. re-learn this symbol's normal behavior (dynamic thresholds)
-   ComputeModernIndicators();
-   UpdateDynamicContext();
-
-   // 1. track the running forecast against the bar that just closed
-   ForecastUpdate();
-
-   // 2. stage 2: does the market prove or kill the pending candidate?
-   CandidateUpdate();
-
-   // 3. read the last closed candle like a human trader (stage 1: detect)
-   AnalyzeLastBar();
-
-   // 4. render
-   ForecastDrawLevels();
-   PanelRender();
+   int cap = ArraySize(rows);
+   if(n >= cap) return;
+   rows[n] = s; cols[n] = c; n++;
   }
 
-void OnTimer()
+void PaintPanel(string pfx, int x0, int y0, int width, string &rows[], color &cols[], int n)
   {
-   PanelRender();   // keeps countdown / spread / forming candle fresh between ticks
-  }
-
-//====================================================================//
-//  DATA                                                              //
-//====================================================================//
-
-bool IsNewBar()
-  {
-   datetime t = iTime(_Symbol, _Period, 0);
-   if(t == 0 || t == g_lastBar)
-      return(false);
-   g_lastBar = t;
-   return(true);
-  }
-
-void UpdateData()
-  {
-   g_dataOK = false;
-
-   int available = Bars(_Symbol, _Period);
-   if(available < 300)
-     {
-      g_statusMsg = "not enough history (" + IntegerToString(available) + " bars, need 300+)";
-      return;
-     }
-
-   int want = MathMax(300, MathMin(HISTORY_BARS + 10, available - 3));
-   if(want < 100)
-      return;
-
-   ArraySetAsSeries(g_rates, true);
-   ArraySetAsSeries(g_emaF,  true);  ArraySetAsSeries(g_emaS,  true);
-   ArraySetAsSeries(g_rsi,   true);
-   ArraySetAsSeries(g_atr,   true);
-   ArraySetAsSeries(g_adx,   true);  ArraySetAsSeries(g_pdi,  true);
-   ArraySetAsSeries(g_mdi,   true);  ArraySetAsSeries(g_bbUp, true);
-   ArraySetAsSeries(g_bbLo,  true);  ArraySetAsSeries(g_vol,  true);
-
-   int copied = CopyRates(_Symbol, _Period, 0, want, g_rates);
-   if(copied < 100)
-     {
-      g_statusMsg = "history is loading...";
-      return;
-     }
-   g_window = copied;
-
-   if(CopyBuffer(hEmaFast,0,0,copied,g_emaF)  < copied) return;
-   if(CopyBuffer(hEmaSlow,0,0,copied,g_emaS)  < copied) return;
-   if(CopyBuffer(hRSI,    0,0,copied,g_rsi)   < copied) return;
-   if(CopyBuffer(hATR,    0,0,copied,g_atr)   < copied) return;
-   if(CopyBuffer(hADX,    0,0,copied,g_adx)   < copied) return;
-   if(CopyBuffer(hADX,    1,0,copied,g_pdi)   < copied) return;
-   if(CopyBuffer(hADX,    2,0,copied,g_mdi)   < copied) return;
-   if(CopyBuffer(hBands,  1,0,copied,g_bbUp)  < copied) return;
-   if(CopyBuffer(hBands,  2,0,copied,g_bbLo)  < copied) return;
-   if(CopyTickVolume(_Symbol,_Period,0,copied,g_vol) < copied) return;
-
-   g_dataOK  = true;
-   g_statusMsg = "";
-  }
-
-//====================================================================//
-//  MODERN INDICATOR ENGINE                                           //
-//====================================================================//
-//  Replacements / additions over the classic toolkit, all computed
-//  from data we already copy (no extra handles needed):
-//    QQE      - smoothed RSI with Wilder trailing bands (factor 4.236):
-//               replaces Stochastic as the momentum-shift check, far less
-//               whipsaw because the crossover level adapts to RSI volatility
-//    Fisher   - Ehlers Fisher Transform: normalizes price into a sharp
-//               near-Gaussian oscillator; turns at extremes are much sharper
-//               than MACD histogram drift
-//    CHOP     - Choppiness Index (Dreiss): >61.8 range, <38.2 trend;
-//               the regime dial behind the breakout rule
-//    Squeeze  - TTM squeeze (BB inside Keltner EMA20 +/- 1.5 ATR):
-//               compression -> expansion detection for breakouts
-
-void ComputeModernIndicators()
-  {
-   int n = g_window;
-   ArrayResize(g_qqeRsim, n);
-   ArrayResize(g_qqeTrend, n);
-   ArrayResize(g_fish, n);
-
-   //--- QQE: EMA(5) of RSI + Wilder(14) of its change -> trailing bands
-   double rsimPrev = 0, darPrev = 0, trailPrev = 0, longPrev = 0, shortPrev = 0;
-   int    trendPrev = 1;
-   for(int a = 0; a < n; a++)
-     {
-      int s = n - 1 - a;                       // series shift of this step
-      double alpha = 2.0 / 6.0;                // EMA(5)
-      double rsim  = (a == 0 ? g_rsi[s] : rsimPrev + alpha * (g_rsi[s] - rsimPrev));
-      double d     = (a == 0 ? 0 : MathAbs(rsim - rsimPrev));
-      double dar   = (a == 0 ? d : darPrev + (d - darPrev) / 14.0);   // Wilder(14)
-      double longB  = rsim - QQE_FACTOR * dar;
-      double shortB = rsim + QQE_FACTOR * dar;
-      int tr = trendPrev;
-      if(a > 0)
-        {
-         if(tr == -1 && rsim > shortPrev) tr = 1;
-         if(tr ==  1 && rsim < longPrev)  tr = -1;
-        }
-      double trail;
-      if(a == 0)            trail = (tr == 1 ? longB : shortB);
-      else if(tr == 1)      trail = MathMax(longB,  trailPrev);
-      else                  trail = MathMin(shortB, trailPrev);
-      if(a > 0 && tr != trendPrev)                 // trend just flipped: restart band
-         trail = (tr == 1 ? longB : shortB);
-      g_qqeRsim[s]  = rsim;
-      g_qqeTrend[s] = tr;
-      rsimPrev = rsim; darPrev = dar; trailPrev = trail;
-      longPrev = longB; shortPrev = shortB; trendPrev = tr;
-     }
-
-   //--- Ehlers Fisher Transform over median price
-   // NOTE series indexing: index 0 = newest, so from bar s the available
-   // OLDER bars are s..n-1  ->  lookback must be clamped to (n - s)
-   if(n < FISHER_LEN + 2)
-      return;
-   double valPrev = 0, fishPrev = 0;
-   for(int a = 0; a < n; a++)
-     {
-      int s = n - 1 - a;
-      int len = MathMin(FISHER_LEN, n - s);
-      double hh = -DBL_MAX, ll = DBL_MAX;
-      for(int k = 0; k < len; k++)
-        {
-         double mid = 0.5 * (g_rates[s + k].high + g_rates[s + k].low);
-         if(mid > hh) hh = mid;
-         if(mid < ll) ll = mid;
-        }
-      double mid0 = 0.5 * (g_rates[s].high + g_rates[s].low);
-      double raw  = (hh - ll > 0 ? 2.0 * (mid0 - ll) / (hh - ll) - 1.0 : 0.0);
-      double val  = 0.33 * raw + 0.67 * valPrev;
-      if(val >  0.999) val =  0.999;
-      if(val < -0.999) val = -0.999;
-      double fish = 0.5 * MathLog((1 + val) / (1 - val)) + 0.5 * fishPrev;
-      g_fish[s]  = fish;
-      valPrev = val; fishPrev = fish;
-     }
-
-   //--- Choppiness Index on the last closed bar
-   int per = MathMin(CHOP_PERIOD, g_window - 2);
-   double chH = HighestHigh(1, per), chL = LowestLow(1, per);
-   double sumA = 0;
-   for(int k = 1; k <= per; k++) sumA += g_atr[k];
-   g_chop1 = 100.0 * MathLog10((chH - chL) > 0 ? sumA / (chH - chL) : 1.0000001) / MathLog10((double)per);
-
-   //--- TTM squeeze state (Bollinger inside Keltner = compression)
-   g_squeezeOn1 = (g_bbUp[1] < g_emaF[1] + 1.5 * g_atr[1]) && (g_bbLo[1] > g_emaF[1] - 1.5 * g_atr[1]);
-   g_squeezeFired = false;
-   g_squeezeFiredAgo = -1;
-   if(!g_squeezeOn1)
-     {
-      for(int s = 2; s <= 8 && s < g_window; s++)
-        {
-         bool on = (g_bbUp[s] < g_emaF[s] + 1.5 * g_atr[s]) &&
-                   (g_bbLo[s] > g_emaF[s] - 1.5 * g_atr[s]);
-         if(on) { g_squeezeFired = true; g_squeezeFiredAgo = s - 1; break; }
-        }
-     }
-   g_squeezeState = g_squeezeOn1 ? "ON (compressed)"
-                                 : (g_squeezeFired ? "FIRED " + IntegerToString(g_squeezeFiredAgo) + " bars ago" : "off");
-  }
-
-//====================================================================//
-//  DYNAMIC CONTEXT (smart, self-adapting thresholds)                 //
-//====================================================================//
-//  A fixed "RSI oversold = 35" cannot fit every symbol and every
-//  market phase: gold on M5 and EURUSD on M5 have different RSI
-//  distributions, and the same symbol behaves differently in a trend,
-//  a range, or a volatility burst. So SmartTrader re-learns its
-//  limits from the symbol's OWN recent behavior on every closed bar:
-//    - RSI / Stochastic zones  = percentiles of their own history
-//    - ADX trend/strong levels = percentiles of its own history
-//    - volume "real interest"  = percentile of volume-vs-average ratios
-//    - volatility regime       = current ATR vs its median (expanding /
-//                                normal / contracting) -> adjusts scoring
-//    - signal expiry           = scales with the market's current speed
-//  Falls back to the static group-C inputs when disabled or when
-//  history is too short to learn from.
-
-void UpdateDynamicContext()
-  {
-   // defaults = static inputs (fallback when dynamic mode off / not enough data)
-   g_rsiLoEff     = RSI_FALL_LO;
-   g_rsiHiEff     = RSI_FALL_HI;
-   g_rsiMidEff    = 50.0;
-   g_adxTrendEff  = ADX_FALL_TREND;
-   g_adxStrongEff = ADX_FALL_STRONG;
-   g_volMultEff   = VOL_FALL_MULT;
-   g_atrRatio     = 1.0;
-   g_volRegime    = 0;
-   g_dynOK        = false;
-   g_dynNote      = "thresholds: static (from inputs)";
-
-   if(!InpDynamic)
-      return;
-
-   int n = MathMin(DYN_LOOKBACK, g_window - 3);
-   if(n < 100)
-     {
-      g_dynNote = "dynamic: learning needs more history (" + IntegerToString(n) + "/" +
-                  IntegerToString(DYN_LOOKBACK) + " bars) - using static limits";
-      return;
-     }
-
-   double tmp[];
-   ArrayResize(tmp, n);
-
-   //--- RSI zones from the symbol's own RSI distribution
-   for(int i = 0; i < n; i++) tmp[i] = g_rsi[1 + i];
-   g_rsiLoEff  = PercentileOf(tmp, n, DYN_RSI_PCT_LO);
-   g_rsiHiEff  = PercentileOf(tmp, n, DYN_RSI_PCT_HI);
-   g_rsiMidEff = PercentileOf(tmp, n, 50.0);
-
-   //--- ADX trend / strong levels
-   for(int i = 0; i < n; i++) tmp[i] = g_adx[1 + i];
-   g_adxTrendEff  = PercentileOf(tmp, n, DYN_ADX_PCT_TREND);
-   g_adxStrongEff = PercentileOf(tmp, n, DYN_ADX_PCT_STRONG);
-
-   //--- volume: percentile of "volume vs its own 20-bar average" ratios
-   double rat[];
-   ArrayResize(rat, n);
-   for(int i = 0; i < n; i++)
-     {
-      double a = AvgVol(VOL_AVG_BARS, 2 + i);
-      rat[i] = (a > 0 ? (double)g_vol[1 + i] / a : 0);
-     }
-   double pv = PercentileOf(rat, n, DYN_VOL_PCT);
-   g_volMultEff = (pv > 0 ? pv : VOL_FALL_MULT);
-
-   //--- volatility regime: current ATR vs its own median
-   for(int i = 0; i < n; i++) tmp[i] = g_atr[1 + i];
-   double medAtr = PercentileOf(tmp, n, 50.0);
-   if(medAtr > 0)
-      g_atrRatio = g_atr[1] / medAtr;
-   if(g_atrRatio >= DYN_ATR_EXPAND)      g_volRegime =  1;
-   else if(g_atrRatio <= DYN_ATR_SHRINK) g_volRegime = -1;
-
-   g_dynOK = true;
-   g_dynNote = StringFormat("thresholds: DYNAMIC  RSI %.1f/%.1f  ADX %.0f/%.0f  Vol >= %.2fx  ATR %.2fx med",
-                            g_rsiLoEff, g_rsiHiEff,
-                            g_adxTrendEff, g_adxStrongEff, g_volMultEff, g_atrRatio);
-  }
-
-//====================================================================//
-//  CANDLE METRICS & PATTERN ENGINE                                   //
-//====================================================================//
-
-double Body(int i)       { return(MathAbs(g_rates[i].close - g_rates[i].open)); }
-double Range(int i)      { return(g_rates[i].high - g_rates[i].low); }
-double UpWick(int i)     { return(g_rates[i].high - MathMax(g_rates[i].open, g_rates[i].close)); }
-double LoWick(int i)     { return(MathMin(g_rates[i].open, g_rates[i].close) - g_rates[i].low); }
-bool   BullBar(int i)    { return(g_rates[i].close > g_rates[i].open); }
-bool   BearBar(int i)    { return(g_rates[i].close < g_rates[i].open); }
-
-double BodyAvg(int n, int s)
-  {
-   if(s + n >= g_window) n = g_window - s - 1;
-   if(n <= 0) return(0);
-   double sum = 0;
-   for(int i = s; i < s + n; i++) sum += Body(i);
-   return(sum / n);
-  }
-
-double LowestLow(int s, int n)
-  {
-   if(s + n >= g_window) n = g_window - s - 1;
-   double v = g_rates[s].low;
-   for(int i = s; i < s + n; i++) if(g_rates[i].low < v) v = g_rates[i].low;
-   return(v);
-  }
-
-double HighestHigh(int s, int n)
-  {
-   if(s + n >= g_window) n = g_window - s - 1;
-   double v = g_rates[s].high;
-   for(int i = s; i < s + n; i++) if(g_rates[i].high > v) v = g_rates[i].high;
-   return(v);
-  }
-
-double AvgVol(int n, int s)
-  {
-   if(s + n >= g_window) n = g_window - s - 1;
-   if(n <= 0) return(0);
-   double sum = 0;
-   for(int i = s; i < s + n; i++) sum += (double)g_vol[i];
-   return(sum / n);
-  }
-
-double AvgSpeed(int n, int s)
-  {
-   if(s + n + 1 >= g_window) n = g_window - s - 2;
-   if(n <= 0) return(0);
-   double sum = 0;
-   for(int i = s; i < s + n; i++) sum += MathAbs(g_rates[i].close - g_rates[i+1].close);
-   return(sum / n);
-  }
-
-// Kaufman-style path efficiency: net progress / total path travelled.
-// ~1.0 = clean directional move, ~0.2 = choppy two-sided market.
-// A human knows a choppy market needs far more TIME to reach the same target.
-double EfficiencyRatio(int s, int n)
-  {
-   if(s + n + 1 >= g_window) n = g_window - s - 2;
-   if(n < 5) return(1.0);
-   double net  = MathAbs(g_rates[s].close - g_rates[s + n].close);
-   double path = 0;
-   for(int i = s; i < s + n; i++)
-      path += MathAbs(g_rates[i].close - g_rates[i + 1].close);
-   return(path > 0 ? net / path : 0);
-  }
-
-// value at a given percentile (0..100) of arr[0..count-1]; sorts a copy region in place
-double PercentileOf(double &arr[], int count, double pct)
-  {
-   if(count <= 0) return(0);
-   if(count == 1) return(arr[0]);
-   ArraySort(arr);
-   double idx = (pct / 100.0) * (count - 1);
-   int lo = (int)MathFloor(idx);
-   int hi = (int)MathCeil(idx);
-   if(lo < 0) lo = 0;
-   if(hi > count - 1) hi = count - 1;
-   if(lo == hi) return(arr[lo]);
-   double frac = idx - lo;
-   return(arr[lo] * (1.0 - frac) + arr[hi] * frac);
-  }
-
-// detect a pattern whose SIGNAL bar is at 's' (older bars s+1, s+2 used as context)
-bool DetectPatternAt(int s, SPattern &p)
-  {
-   p.code = PC_NONE; p.name = ""; p.direction = 0; p.strength = 0; p.shift = s;
-   if(s + 2 >= g_window) return(false);
-
-   double b0 = Body(s),  r0 = Range(s);
-   if(r0 <= 0) return(false);
-   double uw0 = UpWick(s), lw0 = LoWick(s);
-   double b1 = Body(s+1), r1 = Range(s+1);
-   double avg0 = BodyAvg(20, s);
-   if(avg0 <= 0) return(false);
-   double atr0 = (g_atr[s] > 0 ? g_atr[s] : avg0);
-   double midP2 = (g_rates[s+2].open + g_rates[s+2].close) / 2.0;   // midpoint of the oldest bar body
-   double midP1 = (g_rates[s+1].open + g_rates[s+1].close) / 2.0;
-
-   //--- 3-bar: Morning / Evening star ---------------------------------
-   if(s + 2 < g_window)
-     {
-      bool bigBear2 = BearBar(s+2) && Body(s+2) >= 0.8 * BodyAvg(20, s+2);
-      bool bigBull2 = BullBar(s+2) && Body(s+2) >= 0.8 * BodyAvg(20, s+2);
-      bool smallMid = Body(s+1) <= 0.35 * Body(s+2);
-
-      if(bigBear2 && smallMid && BullBar(s) && g_rates[s].close > midP2)
-        { p.code=PC_MORNING_STAR; p.name="Morning Star";       p.direction= 1; p.strength=3; return(true); }
-      if(bigBull2 && smallMid && BearBar(s) && g_rates[s].close < midP2)
-        { p.code=PC_EVENING_STAR; p.name="Evening Star";       p.direction=-1; p.strength=3; return(true); }
-     }
-
-   //--- 3-bar: Three White Soldiers / Three Black Crows ----------------
-   if(BullBar(s) && BullBar(s+1) && BullBar(s+2) &&
-      g_rates[s].close > g_rates[s+1].close && g_rates[s+1].close > g_rates[s+2].close &&
-      Body(s) >= 0.55*r0 && Body(s+1) >= 0.55*r1 && Body(s+2) >= 0.55*Range(s+2) &&
-      UpWick(s) <= 0.6*Body(s))
-     { p.code=PC_THREE_SOLDIERS; p.name="Three White Soldiers"; p.direction= 1; p.strength=3; return(true); }
-
-   if(BearBar(s) && BearBar(s+1) && BearBar(s+2) &&
-      g_rates[s].close < g_rates[s+1].close && g_rates[s+1].close < g_rates[s+2].close &&
-      Body(s) >= 0.55*r0 && Body(s+1) >= 0.55*r1 && Body(s+2) >= 0.55*Range(s+2) &&
-      LoWick(s) <= 0.6*Body(s))
-     { p.code=PC_THREE_CROWS; p.name="Three Black Crows";   p.direction=-1; p.strength=3; return(true); }
-
-   //--- 2-bar: Engulfing ------------------------------------------------
-   if(BearBar(s+1) && BullBar(s) &&
-      g_rates[s].open <= g_rates[s+1].close && g_rates[s].close >= g_rates[s+1].open &&
-      b0 >= MathMax(0.6*avg0, b1))
-     { p.code=PC_BULL_ENGULF; p.name="Bullish Engulfing";   p.direction= 1; p.strength=3; return(true); }
-
-   if(BullBar(s+1) && BearBar(s) &&
-      g_rates[s].open >= g_rates[s+1].close && g_rates[s].close <= g_rates[s+1].open &&
-      b0 >= MathMax(0.6*avg0, b1))
-     { p.code=PC_BEAR_ENGULF; p.name="Bearish Engulfing";   p.direction=-1; p.strength=3; return(true); }
-
-   //--- 2-bar: Piercing / Dark Cloud -----------------------------------
-   if(BearBar(s+1) && Body(s+1) >= 0.8*BodyAvg(20,s+1) && BullBar(s) &&
-      g_rates[s].open < g_rates[s+1].close &&
-      g_rates[s].close > midP1 && g_rates[s].close < g_rates[s+1].open)
-     { p.code=PC_PIERCING; p.name="Piercing Line";          p.direction= 1; p.strength=2; return(true); }
-
-   if(BullBar(s+1) && Body(s+1) >= 0.8*BodyAvg(20,s+1) && BearBar(s) &&
-      g_rates[s].open > g_rates[s+1].close &&
-      g_rates[s].close < midP1 && g_rates[s].close > g_rates[s+1].open)
-     { p.code=PC_DARK_CLOUD; p.name="Dark Cloud Cover";     p.direction=-1; p.strength=2; return(true); }
-
-   //--- 2-bar: Tweezers -------------------------------------------------
-   double tol = 0.12 * atr0;
-   if(BearBar(s+1) && BullBar(s) && MathAbs(g_rates[s].low - g_rates[s+1].low) <= tol &&
-      LoWick(s) >= 0.5*b0)
-     { p.code=PC_TWEEZER_BOTTOM; p.name="Tweezer Bottom";   p.direction= 1; p.strength=2; return(true); }
-
-   if(BullBar(s+1) && BearBar(s) && MathAbs(g_rates[s].high - g_rates[s+1].high) <= tol &&
-      UpWick(s) >= 0.5*b0)
-     { p.code=PC_TWEEZER_TOP; p.name="Tweezer Top";         p.direction=-1; p.strength=2; return(true); }
-
-   //--- 1-bar: Hammer / Shooting Star (real body present) ---------------
-   if(b0 >= 0.08*r0)
-     {
-      if(lw0 >= 2.0*b0 && uw0 <= 0.3*b0 + 0.1*r0 &&
-         (MathMin(g_rates[s].open, g_rates[s].close) - g_rates[s].low) >= 0.55*r0)
-        { p.code=PC_HAMMER; p.name="Hammer";                p.direction= 1; p.strength=2; return(true); }
-
-      if(uw0 >= 2.0*b0 && lw0 <= 0.3*b0 + 0.1*r0 &&
-         (g_rates[s].high - MathMax(g_rates[s].open, g_rates[s].close)) >= 0.55*r0)
-        { p.code=PC_SHOOTING_STAR; p.name="Shooting Star";  p.direction=-1; p.strength=2; return(true); }
-     }
-
-   //--- 1-bar: Dragonfly / Gravestone doji ------------------------------
-   if(b0 <= 0.1*r0)
-     {
-      if(lw0 >= 0.6*r0 && uw0 <= 0.1*r0)
-        { p.code=PC_DRAGONFLY; p.name="Dragonfly Doji";     p.direction= 1; p.strength=2; return(true); }
-      if(uw0 >= 0.6*r0 && lw0 <= 0.1*r0)
-        { p.code=PC_GRAVESTONE; p.name="Gravestone Doji";   p.direction=-1; p.strength=2; return(true); }
-      if(b0 <= 0.05*r0)
-        { p.code=PC_DOJI; p.name="Doji";                    p.direction= 0; p.strength=1; return(true); }
-     }
-
-   //--- 1-bar: Marubozu (momentum continuation) -------------------------
-   if(b0 >= 0.85*r0 && r0 >= 1.4*avg0)
-     {
-      if(BullBar(s)) { p.code=PC_MARU_BULL; p.name="Bullish Marubozu"; p.direction= 1; p.strength=2; return(true); }
-      if(BearBar(s)) { p.code=PC_MARU_BEAR; p.name="Bearish Marubozu"; p.direction=-1; p.strength=2; return(true); }
-     }
-
-   //--- 2-bar: Harami / inside bar --------------------------------------
-   if(g_rates[s].high < g_rates[s+1].high && g_rates[s].low > g_rates[s+1].low &&
-      b1 >= 1.2*BodyAvg(20,s+1) && b0 > 0 && b0 <= 0.4*b1)
-     {
-      if(BearBar(s+1) && BullBar(s))
-        { p.code=PC_HARAMI_BULL; p.name="Bullish Harami";   p.direction= 1; p.strength=1; return(true); }
-      if(BullBar(s+1) && BearBar(s))
-        { p.code=PC_HARAMI_BEAR; p.name="Bearish Harami";   p.direction=-1; p.strength=1; return(true); }
-     }
-
-   return(false);
-  }
-
-//====================================================================//
-//  TREND ENGINE                                                      //
-//====================================================================//
-
-void FindSwings(int s, int lookback, SSwings &sw)
-  {
-   sw.hasH=false; sw.hasH2=false; sw.hasL=false; sw.hasL2=false;
-   sw.sh1=0; sw.sh2=0; sw.sl1=0; sw.sl2=0;
-   sw.sh1s=-1; sw.sh2s=-1; sw.sl1s=-1; sw.sl2s=-1;
-
-   int foundH=0, foundL=0;
-   int last = MathMin(s + lookback, g_window - 3);
-
-   for(int i = s + 2; i <= last; i++)
-     {
-      bool isSH = g_rates[i].high > g_rates[i-1].high && g_rates[i].high > g_rates[i-2].high &&
-                  g_rates[i].high > g_rates[i+1].high && g_rates[i].high > g_rates[i+2].high;
-      bool isSL = g_rates[i].low  < g_rates[i-1].low  && g_rates[i].low  < g_rates[i-2].low &&
-                  g_rates[i].low  < g_rates[i+1].low  && g_rates[i].low  < g_rates[i+2].low;
-
-      if(isSH && foundH < 2)
-        {
-         if(foundH == 0) { sw.sh1 = g_rates[i].high; sw.sh1s = i; sw.hasH = true; }
-         else            { sw.sh2 = g_rates[i].high; sw.sh2s = i; sw.hasH2 = true; }
-         foundH++;
-        }
-      if(isSL && foundL < 2)
-        {
-         if(foundL == 0) { sw.sl1 = g_rates[i].low; sw.sl1s = i; sw.hasL = true; }
-         else            { sw.sl2 = g_rates[i].low; sw.sl2s = i; sw.hasL2 = true; }
-         foundL++;
-        }
-      if(foundH >= 2 && foundL >= 2)
-         break;
-     }
-  }
-
-void TrendAt(int s, STrend &t, SSwings &sw)
-  {
-   t.ema20 = g_emaF[s];
-   t.ema50 = g_emaS[s];
-   t.adx   = g_adx[s];
-   t.pdi   = g_pdi[s];
-   t.mdi   = g_mdi[s];
-   double c = g_rates[s].close;
-
-   FindSwings(s, SWING_LOOKBACK, sw);
-
-   t.swingDir = 0;
-   if(sw.hasH2 && sw.hasL2)
-     {
-      if(sw.sh1 > sw.sh2 && sw.sl1 > sw.sl2)      t.swingDir =  1;   // HH + HL
-      else if(sw.sh1 < sw.sh2 && sw.sl1 < sw.sl2) t.swingDir = -1;   // LH + LL
-     }
-
-   int dir = 0;
-   if(t.ema20 > t.ema50 && c > t.ema50) dir =  1;
-   if(t.ema20 < t.ema50 && c < t.ema50) dir = -1;
-   if(dir != 0 && t.swingDir != 0 && t.swingDir != dir)
-      dir = 0;                                     // EMA and structure disagree -> range
-
-   t.dir = dir;
-   if(dir == 0)                               t.state = TR_RANGE;
-   else if(dir > 0 && t.adx >= g_adxStrongEff) t.state = TR_UP_STRONG;
-   else if(dir > 0)                           t.state = TR_UP;
-   else if(t.adx >= g_adxStrongEff)           t.state = TR_DOWN_STRONG;
-   else                                       t.state = TR_DOWN;
-
-   t.note = "EMA" + IntegerToString(EMA_FAST) + (t.ema20 > t.ema50 ? ">" : (t.ema20 < t.ema50 ? "<" : "=")) +
-            "EMA" + IntegerToString(EMA_SLOW) +
-            ", structure " + (t.swingDir > 0 ? "HH+HL" : (t.swingDir < 0 ? "LH+LL" : "mixed")) +
-            (t.adx >= g_adxTrendEff ? ", trending" : ", weak/range");
-  }
-
-int TrendDirQuick(int s)
-  {
-   if(s + 1 >= g_window) return(0);
-   double eF = g_emaF[s], eS = g_emaS[s], c = g_rates[s].close;
-   if(eF > eS && c > eS) return(1);
-   if(eF < eS && c < eS) return(-1);
-   return(0);
-  }
-
-string TrendStateText(int st)
-  {
-   switch(st)
-     {
-      case TR_UP_STRONG:  return("UP (strong)");
-      case TR_UP:         return("UP (moderate)");
-      case TR_RANGE:      return("RANGE");
-      case TR_DOWN:       return("DOWN (moderate)");
-      case TR_DOWN_STRONG:return("DOWN (strong)");
-     }
-   return("?");
-  }
-
-string SetupTypeName(int t) { return(t == SETUP_REVERSAL ? "reversal" : "continuation"); }
-
-//====================================================================//
-//  VALIDATION (the indicator tools a human uses)                     //
-//====================================================================//
-
-void AddCheck(SCheck &ck[], int &n, string name, int state, string detail)
-  {
-   if(n >= 8) return;
-   ck[n].name   = name;
-   ck[n].state  = state;
-   ck[n].detail = detail;
-   n++;
-  }
-
-void ValidateSetup(const SPattern &pat, const STrend &tr, const SSwings &sw,
-                   SCheck &ck[], int &n, int &score, int &maxScore, int &setupType)
-  {
-   n = 0; score = 0; maxScore = 0;
-   int    d   = pat.direction;
-   double atr = (g_atr[1] > 0 ? g_atr[1] : 0);
-   bool   reversal = (tr.dir != d);          // against trend or in range -> reversal context
-   setupType = reversal ? SETUP_REVERSAL : SETUP_CONTINUATION;
-   const string dyn = (g_dynOK ? " dyn" : "");
-
-   //--- 1. RSI zone -----------------------------------------------------
-   // dynamic mode: limits are percentiles of this symbol's own RSI history,
-   // so a trending symbol automatically gets stricter zones than a ranging one
-   bool okR = false; string detR = "";
-   if(reversal)
-     {
-      if(d > 0) { okR = (g_rsi[1] <= g_rsiLoEff);  detR = StringFormat("%.1f (limit %.1f%s)",  g_rsi[1], g_rsiLoEff, dyn); }
-      else      { okR = (g_rsi[1] >= g_rsiHiEff);  detR = StringFormat("%.1f (limit %.1f%s)",  g_rsi[1], g_rsiHiEff, dyn); }
-     }
-   else
-     {
-      if(d > 0) { okR = (g_rsi[1] > g_rsiMidEff);  detR = StringFormat("%.1f (limit >%.1f%s)", g_rsi[1], g_rsiMidEff, dyn); }
-      else      { okR = (g_rsi[1] < g_rsiMidEff);  detR = StringFormat("%.1f (limit <%.1f%s)", g_rsi[1], g_rsiMidEff, dyn); }
-     }
-   AddCheck(ck, n, "RSI", okR ? CK_PASS : CK_FAIL, detR);
-
-   //--- 2. RSI divergence (reversal setups only) ------------------------
-   if(reversal && ((d > 0 && sw.hasL2) || (d < 0 && sw.hasH2)))
-     {
-      bool okD = false; string detD = "";
-      if(d > 0)
-        {
-         double recentLow  = MathMin(g_rates[1].low, sw.sl1);
-         double rsiRecent  = MathMax(g_rsi[1], g_rsi[sw.sl1s]);
-         okD   = (recentLow < sw.sl2) && (rsiRecent > g_rsi[sw.sl2s]);
-         detD  = StringFormat("px LL %.5f<%.5f, RSI %.1f%s>%.1f", recentLow, sw.sl2, rsiRecent,
-                              (rsiRecent > g_rsi[sw.sl2s] ? " " : "!"), g_rsi[sw.sl2s]);
-        }
-      else
-        {
-         double recentHigh = MathMax(g_rates[1].high, sw.sh1);
-         double rsiRecent  = MathMin(g_rsi[1], g_rsi[sw.sh1s]);
-         okD   = (recentHigh > sw.sh2) && (rsiRecent < g_rsi[sw.sh2s]);
-         detD  = StringFormat("px HH %.5f>%.5f, RSI %.1f%s<%.1f", recentHigh, sw.sh2, rsiRecent,
-                              (rsiRecent < g_rsi[sw.sh2s] ? " " : "!"), g_rsi[sw.sh2s]);
-        }
-      AddCheck(ck, n, "RSI divergence", okD ? CK_PASS : CK_FAIL, detD);
-     }
-   else
-      AddCheck(ck, n, "RSI divergence", CK_NA, reversal ? "needs 2 swings in lookback" : "reversal setups only");
-
-   //--- 3. QQE (modern momentum): smoothed RSI vs adaptive trailing bands -
-   //       replaces Stochastic: the cross level adapts to RSI volatility,
-   //       filtering the whipsaw crosses a fixed-level Stochastic produces
-   bool qqeBuyFresh  = (g_qqeTrend[1] ==  1 && g_qqeTrend[2] == -1) ||
-                       (g_qqeTrend[1] ==  1 && g_qqeTrend[2] ==  1 && g_qqeTrend[3] == -1);
-   bool qqeSellFresh = (g_qqeTrend[1] == -1 && g_qqeTrend[2] ==  1) ||
-                       (g_qqeTrend[1] == -1 && g_qqeTrend[2] == -1 && g_qqeTrend[3] ==  1);
-   bool okQ; string detQ;
-   if(reversal)
-     {
-      okQ  = d > 0 ? qqeBuyFresh : qqeSellFresh;
-      detQ = StringFormat("smoothed RSI %.1f, trend %s%s", g_qqeRsim[1],
-                          (g_qqeTrend[1] > 0 ? "up" : "down"), okQ ? ", fresh cross" : ", no fresh cross");
-     }
-   else
-     {
-      bool momUp = (g_qqeTrend[1] ==  1 && g_qqeRsim[1] > g_qqeRsim[2]);
-      bool momDn = (g_qqeTrend[1] == -1 && g_qqeRsim[1] < g_qqeRsim[2]);
-      okQ  = d > 0 ? momUp : momDn;
-      detQ = StringFormat("smoothed RSI %.1f %s, trend %s", g_qqeRsim[1],
-                          (g_qqeRsim[1] >= g_qqeRsim[2] ? "rising" : "falling"),
-                          (g_qqeTrend[1] > 0 ? "up" : "down"));
-     }
-   AddCheck(ck, n, "QQE", okQ ? CK_PASS : CK_FAIL, detQ);
-
-   //--- 4. Ehlers Fisher Transform: sharp turn detection -------------------
-   //       replaces MACD histogram drift; the transform spikes and reverses
-   //       exactly at momentum extremes, giving earlier turn confirmation
-   double f1 = g_fish[1], f2 = g_fish[2];
-   bool okF; string detF;
-   if(reversal)
-     {
-      bool turnUp = (f1 > f2) && (f2 < 0.0);   // crossing up from lower half
-      bool turnDn = (f1 < f2) && (f2 > 0.0);   // crossing down from upper half
-      okF  = d > 0 ? turnUp : turnDn;
-      detF = StringFormat("fisher %.2f -> %.2f (%s)", f2, f1, okF ? "turn confirmed" : "no turn");
-     }
-   else
-     {
-      okF  = d > 0 ? (f1 > f2 && f1 > 0) : (f1 < f2 && f1 < 0);
-      detF = StringFormat("fisher %.2f %s zero, %s", f1, (f1 > 0 ? "above" : "below"),
-                          (d > 0 ? (f1 > f2 ? "rising" : "flat/falling") : (f1 < f2 ? "falling" : "flat/rising")));
-     }
-   AddCheck(ck, n, "Fisher", okF ? CK_PASS : CK_FAIL, detF);
-
-   //--- 5. Volume spike ---------------------------------------------------
-   double vAvg = AvgVol(VOL_AVG_BARS, 2);
-   bool okV = false; string detV;
-   if(vAvg > 0)
-     {
-      double ratio = (double)g_vol[1] / vAvg;
-      okV  = (ratio >= g_volMultEff);   // dynamic: limit = this symbol's own "high interest" percentile
-      detV = StringFormat("%.2fx of avg (need %.2fx%s)", ratio, g_volMultEff, dyn);
-     }
-   else { detV = "no volume data"; }
-   AddCheck(ck, n, "Volume", okV ? CK_PASS : CK_FAIL, detV);
-
-   //--- 6. Bollinger rejection (reversal) / EMA20 side (continuation) ----
-   bool okB; string detB; string nmB;
-   if(reversal)
-     {
-      nmB = "BB rejection";
-      if(d > 0)
-        {
-         okB  = (g_rates[1].low  < g_bbLo[1]) && (g_rates[1].close > g_bbLo[1]);
-         detB = StringFormat("low %s vs lower %s", DoubleToString(g_rates[1].low, _Digits), DoubleToString(g_bbLo[1], _Digits));
-        }
-      else
-        {
-         okB  = (g_rates[1].high > g_bbUp[1]) && (g_rates[1].close < g_bbUp[1]);
-         detB = StringFormat("high %s vs upper %s", DoubleToString(g_rates[1].high, _Digits), DoubleToString(g_bbUp[1], _Digits));
-        }
-     }
-   else
-     {
-      nmB = "EMA20 side";
-      if(d > 0) { okB = (g_rates[1].close > g_emaF[1]); detB = "close above EMA20"; }
-      else      { okB = (g_rates[1].close < g_emaF[1]); detB = "close below EMA20"; }
-     }
-   AddCheck(ck, n, nmB, okB ? CK_PASS : CK_FAIL, detB);
-
-   //--- 7. Location / ADX -------------------------------------------------
-   if(reversal)
-     {
-      double locDist = LOC_ATR_FRAC * atr;
-      bool okL = false; string detL;
-      if(d > 0)
-        {
-         bool nearSwing = sw.hasL && (g_rates[1].low <= sw.sl1 + locDist);
-         bool barLow20  = (g_rates[1].low <= LowestLow(2, 20));
-         okL  = nearSwing || barLow20;
-         detL = nearSwing ? "at recent swing low" : (barLow20 ? "20-bar lowest low" : "mid-air");
-        }
-      else
-        {
-         bool nearSwing = sw.hasH && (g_rates[1].high >= sw.sh1 - locDist);
-         bool barHi20   = (g_rates[1].high >= HighestHigh(2, 20));
-         okL  = nearSwing || barHi20;
-         detL = nearSwing ? "at recent swing high" : (barHi20 ? "20-bar highest high" : "mid-air");
-        }
-      AddCheck(ck, n, "Location", okL ? CK_PASS : CK_FAIL, detL);
-     }
-   else
-     {
-      bool okA = (tr.adx >= g_adxTrendEff);
-      AddCheck(ck, n, "ADX strength", okA ? CK_PASS : CK_FAIL,
-               StringFormat("ADX %.1f need %.1f%s (+DI %.1f / -DI %.1f)", tr.adx, g_adxTrendEff, dyn, tr.pdi, tr.mdi));
-     }
-
-   for(int i = 0; i < n; i++)
-     {
-      if(ck[i].state == CK_NA) continue;
-      maxScore++;
-      if(ck[i].state == CK_PASS) score++;
-     }
-  }
-
-//====================================================================//
-//  MASTER ANALYSIS OF LAST CLOSED BAR                                //
-//====================================================================//
-
-void AnalyzeLastBar()
-  {
-   g_hasPat = DetectPatternAt(1, g_lastPat);
-
-   TrendAt(1, g_trend, g_swings);
-
-   g_decision     = DEC_NONE;
-   g_decisionNote = "";
-
-   if(!g_hasPat || g_lastPat.direction == 0)
-     {
-      g_checkCount = 0;
-      g_score = 0; g_maxScore = 0;
-      return;
-     }
-
-   ValidateSetup(g_lastPat, g_trend, g_swings, g_checks, g_checkCount, g_score, g_maxScore, g_setupType);
-
-   int need = g_minScoreValid;
-   bool againstStrong = (g_setupType == SETUP_REVERSAL &&
-                         (g_trend.state == TR_UP_STRONG || g_trend.state == TR_DOWN_STRONG));
-   if(againstStrong)
-      need += g_strongExtra;
-
-   // market-context rule: in a choppy regime momentum breakouts usually fail,
-   // UNLESS a volatility squeeze just fired (compression released with force)
-   bool chopBreakout = (g_setupType == SETUP_CONTINUATION &&
-                        g_chop1 >= CHOP_CHOPPY && !g_squeezeFired);
-   if(chopBreakout)
-      need += 1;
-
-   // a continuation call inside a structureless (mixed) market is exactly the
-   // whipsaw a human avoids - demand one extra confirmation
-   bool mixedContinuation = (g_setupType == SETUP_CONTINUATION && g_trend.swingDir == 0);
-   if(mixedContinuation)
-      need += 1;
-
-   // flip protection: never build a new idea against a protected active forecast
-   bool   flipBlocked = false;
-   string gateNote    = "";
-   if(g_fc.used && g_fc.status == FC_ACTIVE && g_lastPat.direction != g_fc.dir)
-     {
-      int age = (int)((g_rates[1].time - g_fc.tSignal) / PeriodSeconds(_Period));
-      if(age < FLIP_MIN_AGE || g_score < need + 1)
-        {
-         flipBlocked = true;
-         gateNote = "active " + (g_fc.dir > 0 ? "BUY" : "SELL") + " forecast protected - opposite setup ignored";
-        }
-     }
-
-   if(g_score >= need && !flipBlocked)
-     {
-      g_decision = DEC_VALID;              // stage 1 passed -> candidate opens; stage 2 (proof) decides
-      if(againstStrong)          g_decisionNote = "against strong trend - extra confirmation was required";
-      else if(chopBreakout)      g_decisionNote = "choppy market - breakout needed extra confirmation";
-      else if(mixedContinuation) g_decisionNote = "mixed structure - continuation needed extra confirmation";
-     }
-   else if(g_score >= need && flipBlocked)
-     {
-      g_decision = DEC_WATCH;              // gated: shown on watchlist, not acted on
-      g_decisionNote = gateNote;
-     }
-   else if(g_score >= g_minScoreWatch)
-     {
-      g_decision = DEC_WATCH;
-      if(againstStrong)          g_decisionNote = "would need " + IntegerToString(need) + "/7 against a strong trend";
-      else if(chopBreakout)      g_decisionNote = "would need " + IntegerToString(need) + "/7 in a choppy market";
-      else if(mixedContinuation) g_decisionNote = "would need " + IntegerToString(need) + "/7 in mixed structure";
-     }
-   else
-      g_decisionNote = "score below watchlist threshold (" + IntegerToString(g_minScoreWatch) + ")";
-
-   if(g_decision == DEC_VALID)
-      CandidateOpen();                     // NOT a forecast yet - the market must prove it first
-   else if(g_decision == DEC_WATCH)
-     {
-      DrawSignalArrow(g_lastPat, false);
-      HistoryScanIfNeeded();
-      if(InpAlertWatch)
-         Notify(AlertText(false));
-     }
-  }
-
-//====================================================================//
-//  FORECAST (entry / SL / TP1 / TP2 / duration / expiry)             //
-//====================================================================//
-
-void ResetForecast(SForecast &f)
-  {
-   f.used = false; f.dir = 0; f.status = FC_ACTIVE; f.tSignal = 0;
-   f.patternName = ""; f.strength = 0; f.setupType = SETUP_REVERSAL;
-   f.score = 0; f.maxScore = 0;
-   f.entry = 0; f.sl = 0; f.tp1 = 0; f.tp2 = 0; f.atr = 0;
-   f.expBars = 0; f.expiryBars = 0; f.tExpire = 0; f.barsLeft = 0;
-   f.histWins = 0; f.histTotal = 0;
-  }
-
-int AutoExpiryBars()
-  {
-   if(InpSignalExpiryBars > 0) return(InpSignalExpiryBars);
-   return(_Period == PERIOD_M5 ? 12 : 8);
-  }
-
-// signal validation time: static input, or adaptive to how fast THIS market
-// currently moves (a slow market gets more bars to develop, a fast one fewer)
-int EffectiveExpiryBars(int expBarsEstimate)
-  {
-   if(!InpDynamic || !g_dynOK || expBarsEstimate <= 0)
-      return(AutoExpiryBars());
-   int base = AutoExpiryBars();
-   int dyn  = 2 * expBarsEstimate;                     // ~2x its estimated time to TP1
-   if(dyn < base)    dyn = base;                       // never shorter than the default window
-   if(dyn > 4 * base) dyn = 4 * base;
-   return(dyn);
-  }
-
-double SwingLowNear(int s)
-  {
-   SSwings sw;
-   FindSwings(s, SWING_LOOKBACK, sw);
-   return(sw.hasL ? sw.sl1 : 0);
-  }
-
-double SwingHighNear(int s)
-  {
-   SSwings sw;
-   FindSwings(s, SWING_LOOKBACK, sw);
-   return(sw.hasH ? sw.sh1 : 0);
-  }
-
-// returns stop-loss price for direction d with signal bar at shift s
-double CalcSL(int s, int d)
-  {
-   double atr = (g_atr[s] > 0 ? g_atr[s] : 0);
-   if(atr <= 0) return(0);
-   double base;
-   if(d > 0)
-     {
-      double swLo = SwingLowNear(s);
-      base = (swLo > 0 ? MathMin(g_rates[s].low, swLo) : g_rates[s].low);
-      double sl = base - g_slBufATR * atr;
-      if(g_rates[s].close - sl > g_slMaxATR * atr)          // keep stop human-sane
-         sl = g_rates[s].low - g_slBufATR * atr;
-      return(sl);
-     }
-   double swHi = SwingHighNear(s);
-   base = (swHi > 0 ? MathMax(g_rates[s].high, swHi) : g_rates[s].high);
-   double sl = base + g_slBufATR * atr;
-   if(sl - g_rates[s].close > g_slMaxATR * atr)
-      sl = g_rates[s].high + g_slBufATR * atr;
-   return(sl);
-  }
-
-// how many bars a pattern spans (its "reversal zone" for proof triggers)
-int PatternSpan(int code)
-  {
-   switch(code)
-     {
-      case PC_MORNING_STAR:   case PC_EVENING_STAR:
-      case PC_THREE_SOLDIERS: case PC_THREE_CROWS:      return(3);
-      case PC_BULL_ENGULF:    case PC_BEAR_ENGULF:
-      case PC_PIERCING:       case PC_DARK_CLOUD:
-      case PC_TWEEZER_BOTTOM: case PC_TWEEZER_TOP:
-      case PC_HARAMI_BULL:    case PC_HARAMI_BEAR:      return(2);
-     }
-   return(1);
-  }
-
-//====================================================================//
-//  STAGE 2: CANDIDATE - "is this reversal true or false?"            //
-//====================================================================//
-//  A validated setup is NOT yet a forecast. Like a human who spotted
-//  a hammer but waits for proof, SmartTrader opens a candidate and
-//  gives the market CONFIRM_BARS bars to speak:
-//    close beyond the pattern's extreme  -> TRUE  -> build projection
-//    close beyond the opposite extreme   -> FALSE -> candidate killed
-//    neither within the window           -> expired (never happened)
-
-void CandidateOpen()
-  {
-   int span = PatternSpan(g_lastPat.code);
-   int s    = g_lastPat.shift;
-   int end  = s + span - 1;
-   if(end + 2 >= g_window)
-      return;
-   int len = MathMin(SWING_LOOKBACK, g_window - end - 1);
-
-   SPending p;
-   p.used        = true;
-   p.dir         = g_lastPat.direction;
-   p.tDetect     = g_rates[s].time;
-   p.patternName = g_lastPat.name;
-   p.code        = g_lastPat.code;
-   p.strength    = g_lastPat.strength;
-   p.setupType   = g_setupType;
-   p.score       = g_score;
-   p.maxScore    = g_maxScore;
-   p.zoneHigh    = HighestHigh(s, span);
-   p.zoneLow     = LowestLow(s, span);
-   double wHi = HighestHigh(end, len), wLo = LowestLow(end, len);
-   p.legHigh  = MathMax(wHi, p.zoneHigh);      // prior leg (projection base)
-   p.legLow   = MathMin(wLo, p.zoneLow);
-   p.atr         = g_atr[s];
-   p.confirmBars = CONFIRM_BARS;
-   p.confirmLeft = CONFIRM_BARS;
-
-   bool refreshed = g_pend.used;
-   g_pend    = p;
-   g_pendNote = refreshed ? "candidate refreshed with a newer " + g_lastPat.name : "";
-
-   DrawSignalArrow(g_lastPat, true);
-   HistoryScanIfNeeded();
-   if(InpAlertWatch)
-      Notify(AlertText(false));
-  }
-
-void CandidateUpdate()
-  {
-   if(!g_pend.used)
-      return;
-
-   int    d  = g_pend.dir;
-   double c1 = g_rates[1].close;
-   bool confirmed = (d > 0 ? c1 > g_pend.zoneHigh : c1 < g_pend.zoneLow);
-   bool failed    = (d > 0 ? c1 < g_pend.zoneLow  : c1 > g_pend.zoneHigh);
-
-   if(failed)   // the human's "this reversal was fake" moment
-     {
-      g_pendNote = "candidate FAILED (false reversal) at " + TimeToString(TimeCurrent(), TIME_MINUTES);
-      g_pend.used = false;
-      return;
-     }
-
-   if(confirmed)
-     {
-      // entry-time discipline: one idea at a time, flips need real conviction
-      if(g_fc.used && g_fc.status == FC_ACTIVE)
-        {
-         if(g_fc.dir == d)
-           {
-            g_pendNote = "candidate proved but a forecast already tracks this direction";
-            g_pend.used = false;
-            return;
-           }
-         int age = (int)((g_rates[1].time - g_fc.tSignal) / PeriodSeconds(_Period));
-         if(age >= FLIP_MIN_AGE && g_pend.score >= g_minScoreValid + 1)
-           {
-            g_fc.status = FC_CANCELLED;
-            g_statC++;
-            PushRecent("cancelled (proved flip)");
-            DrawResolveLabel(FC_CANCELLED, g_rates[1].close);
-            g_hasDone = true;
-            g_lastDone = g_fc;
-            ResetForecast(g_fc);
-           }
-         else
-           {
-            g_pendNote = "candidate proved but the active forecast is protected";
-            g_pend.used = false;
-            return;
-           }
-        }
-      if(TimeCurrent() < g_cooldownUntil)
-         return;                        // wait out the cooldown, keep the proof
-      StartForecast();
-      g_pend.used = false;
-      return;
-     }
-
-   g_pend.confirmLeft--;
-   if(g_pend.confirmLeft <= 0)
-     {
-      g_pendNote = "candidate expired (no proof in " + IntegerToString(g_pend.confirmBars) +
-                   " bars) at " + TimeToString(TimeCurrent(), TIME_MINUTES);
-      g_pend.used = false;
-     }
-  }
-
-void DrawConfirmLabel(int d)
-  {
-   datetime t = g_rates[1].time;
-   string name = OBJ_PREFIX + "CNF_" + IntegerToString((long)t);
-   double price = (d > 0 ? g_rates[1].low - 0.8 * g_atr[1] : g_rates[1].high + 0.8 * g_atr[1]);
-   if(ObjectCreate(0, name, OBJ_TEXT, 0, t, price))
-     {
-      ObjectSetString(0, name, OBJPROP_TEXT, "PROVED");
-      ObjectSetInteger(0, name, OBJPROP_COLOR, d > 0 ? clrLime : clrTomato);
-      ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 8);
-      ObjectSetInteger(0, name, OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
-      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
-      ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
-     }
-  }
-
-void StartForecast()
-  {
-   if(!g_pend.used)
-      return;
-
-   int    d     = g_pend.dir;
-   double atr   = g_atr[1];
-   double entry = g_rates[1].close;              // entry at the PROOF bar close, like a human acting on confirmation
-   double sl    = CalcSL(1, d);
-   if(atr <= 0 || sl <= 0 || entry <= 0)
-     {
-      g_pendNote = "candidate dropped (bad data at proof)";
-      return;
-     }
-   double slDist = MathAbs(entry - sl);
-
-   // spread sanity: costs must stay noise vs the risk
-   double spreadPrice = (double)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) * _Point;
-   if(slDist < 2.0 * spreadPrice)
-     {
-      g_pendNote = "candidate dropped: stop too tight vs spread (" +
-                   DoubleToString(slDist / _Point, 0) + " pts)";
-      return;
-     }
-
-   //--- FORWARD PROJECTION -------------------------------------------
-   // where may price go within the horizon? A human measures the prior
-   // leg and projects its retracement; the R-multiples are the floor.
-   double legSize = g_pend.legHigh - g_pend.legLow;
-   double tp1, tp2;
-   if(legSize > 0)
-     {
-      if(d > 0) { tp1 = g_pend.legLow  + RETR_TP1 * legSize;  tp2 = g_pend.legLow  + RETR_TP2 * legSize; }
-      else      { tp1 = g_pend.legHigh - RETR_TP1 * legSize;  tp2 = g_pend.legHigh - RETR_TP2 * legSize; }
-     }
-   else { tp1 = entry; tp2 = entry; }
-   double r1 = (d > 0 ? entry + 1.0 * slDist : entry - 1.0 * slDist);
-   double r2 = (d > 0 ? entry + 2.0 * slDist : entry - 2.0 * slDist);
-   tp1 = (d > 0 ? MathMax(tp1, r1) : MathMin(tp1, r1));   // reward at least 1R
-   tp2 = (d > 0 ? MathMax(tp2, r2) : MathMin(tp2, r2));   // and 2R
-
-   //--- how long the move may take: net directional speed
-   double speed = AvgSpeed(SPEED_BARS, 1);
-   if(speed <= 0) speed = atr * 0.3;
-   double er       = EfficiencyRatio(1, SPEED_BARS);
-   double dirSpeed = MathMax(speed * MathMax(er, 0.25), _Point);
-   int expBars = (int)MathCeil(MathAbs(tp1 - entry) / dirSpeed);
-   int capBars = 3 * AutoExpiryBars();
-   if(expBars < 3)       expBars = 3;
-   if(expBars > capBars) expBars = capBars;
-
-   ResetForecast(g_fc);
-   g_fc.used       = true;
-   g_fc.dir        = d;
-   g_fc.status     = FC_ACTIVE;
-   g_fc.tSignal    = g_rates[1].time;
-   g_fc.patternName= g_pend.patternName;
-   g_fc.strength   = g_pend.strength;
-   g_fc.setupType  = g_pend.setupType;
-   g_fc.score      = g_pend.score;
-   g_fc.maxScore   = g_pend.maxScore;
-   g_fc.entry      = entry;
-   g_fc.sl         = sl;
-   g_fc.tp1        = tp1;
-   g_fc.tp2        = tp2;
-   g_fc.atr        = atr;
-   g_fc.expBars    = expBars;
-   g_fc.expiryBars = EffectiveExpiryBars(expBars);
-   g_fc.tExpire    = (datetime)(g_rates[1].time + (long)g_fc.expiryBars * PeriodSeconds(_Period));
-   g_fc.barsLeft   = g_fc.expiryBars;
-
-   HistoryScanFor(g_pend.code, d, g_pend.setupType, g_fc.histWins, g_fc.histTotal);
-   UpdateHistNote(g_fc.histWins, g_fc.histTotal);
-
-   DrawSignalArrowAt(1, d, true);
-   DrawConfirmLabel(d);
-   ForecastDrawLevels();
-
-   g_pendNote = "candidate PROVED -> forecast issued at " + TimeToString(TimeCurrent(), TIME_MINUTES);
-   Notify(AlertText(true));
-  }
-
-void ForecastUpdate()
-  {
-   if(!g_fc.used || g_fc.status != FC_ACTIVE)
-      return;
-
-   double hi = g_rates[1].high, lo = g_rates[1].low;
-   int d = g_fc.dir;
-
-   if(d > 0)
-     {
-      if(lo <= g_fc.sl)                     { ResolveForecast(FC_SL,  g_fc.sl);      return; }
-      if(hi >= g_fc.tp2)                    { ResolveForecast(FC_TP2, g_fc.tp2);     return; }
-      if(hi >= g_fc.tp1)                    { ResolveForecast(FC_TP1, g_fc.tp1);     return; }
-     }
-   else
-     {
-      if(hi >= g_fc.sl)                     { ResolveForecast(FC_SL,  g_fc.sl);      return; }
-      if(lo <= g_fc.tp2)                    { ResolveForecast(FC_TP2, g_fc.tp2);     return; }
-      if(lo <= g_fc.tp1)                    { ResolveForecast(FC_TP1, g_fc.tp1);     return; }
-     }
-
-   if(g_rates[1].time >= g_fc.tExpire)
-     {
-      ResolveForecast(FC_EXPIRED, g_rates[1].close);
-      return;
-     }
-
-   g_fc.barsLeft = (int)((g_fc.tExpire - g_rates[1].time) / PeriodSeconds(_Period));
-   if(g_fc.barsLeft < 0) g_fc.barsLeft = 0;
-  }
-
-void ResolveForecast(int status, double price)
-  {
-   g_fc.status    = status;
-   g_fc.barsLeft  = 0;
-
-   if(status == FC_TP1 || status == FC_TP2) { g_statW++; PushRecent("TP hit"); }
-   else if(status == FC_SL)                 { g_statL++; PushRecent("SL hit"); }
-   else if(status == FC_EXPIRED)            { g_statX++; PushRecent("expired"); }
-   else                                     { g_statC++; PushRecent("cancelled"); }
-
-   DrawResolveLabel(status, price);
-
-   // stability: brief pause before any new forecast (a human steps back after a call resolves)
-   g_cooldownUntil = (datetime)(g_rates[1].time + COOLDOWN_BARS * PeriodSeconds(_Period));
-
-   g_hasDone  = true;
-   g_lastDone = g_fc;
-   ResetForecast(g_fc);
-
-   Print("SmartTrader forecast resolved: ", StatusText(status), " at ", DoubleToString(price, _Digits));
-  }
-
-string StatusText(int st)
-  {
-   switch(st)
-     {
-      case FC_ACTIVE:    return("ACTIVE");
-      case FC_TP1:       return("TP1 HIT");
-      case FC_TP2:       return("TP2 HIT");
-      case FC_SL:        return("SL HIT");
-      case FC_EXPIRED:   return("EXPIRED");
-      case FC_CANCELLED: return("CANCELLED");
-     }
-   return("?");
-  }
-
-void PushRecent(string label)
-  {
-   string s = TimeToString(TimeCurrent(), TIME_MINUTES) + " " + label;
-   for(int i = MathMin(g_recentN, MAX_RECENT - 1); i > 0; i--) g_recent[i] = g_recent[i-1];
-   g_recent[0] = s;
-   if(g_recentN < MAX_RECENT) g_recentN++;
-  }
-
-//====================================================================//
-//  PAST-HISTORY QUICK CHECK                                          //
-//====================================================================//
-
-void HistoryScanIfNeeded()
-  {
-   if(g_histKey != g_lastPat.code || g_histKeyD != g_lastPat.direction || g_histKeyT != g_setupType)
-     {
-      double w = 0, t = 0;
-      HistoryScanFor(g_lastPat.code, g_lastPat.direction, g_setupType, w, t);
-      UpdateHistNote(w, t);
-     }
-  }
-
-void UpdateHistNote(double w, double t)
-  {
-   if(t < 1)
-      g_histNote = "past " + IntegerToString(HISTORY_BARS) + " bars: no comparable setups";
-   else
-     {
-      double rate = 100.0 * w / t;
-      g_histNote = "past " + IntegerToString(HISTORY_BARS) + " bars: " +
-                   DoubleToString(w, 0) + "/" + DoubleToString(t, 0) +
-                   " (" + DoubleToString(rate, 0) + "%) reached TP1 first";
-     }
-  }
-
-// replay every occurrence of the same setup over recent history:
-// entry = signal-bar close, SL/TP = same formulas as the live forecast,
-// outcome = TP1 hit before SL within the expiry window (SL first = loss, conservative)
-void HistoryScanFor(int code, int dir, int setupType, double &wins, double &total)
-  {
-   g_histKey = code; g_histKeyD = dir; g_histKeyT = setupType;
-   wins = 0; total = 0;
-
-   int maxExp = 3 * AutoExpiryBars();   // upper bound of the adaptive expiry
-   int start  = MathMin(HISTORY_BARS, g_window - maxExp - 3);
-
-   for(int s = start; s >= 3; s--)
-     {
-      SPattern p;
-      if(!DetectPatternAt(s, p))
-         continue;
-      if(p.code != code || p.direction != dir)
-         continue;
-
-      int tdir = TrendDirQuick(s);
-      bool isRev = (tdir != dir);
-      if((setupType == SETUP_REVERSAL) != isRev)
-         continue;
-
-      double atr = g_atr[s];
-      if(atr <= 0)
-         continue;
-      double entry = g_rates[s].close;
-      double sl    = CalcSL(s, dir);
-      if(sl <= 0)
-         continue;
-      double slDist = MathAbs(entry - sl);
-      if(slDist <= 0)
-         continue;
-      double tp1   = (dir > 0 ? entry + g_tp1R * slDist : entry - g_tp1R * slDist);
-
-      // per-signal adaptive expiry, same formula as the live forecast
-      double speedH = AvgSpeed(SPEED_BARS, s);
-      int    expH   = EffectiveExpiryBars(speedH > 0 ? (int)MathCeil(MathAbs(tp1 - entry) / speedH) : 0);
-
-      bool resolved  = false;
-      int  stop      = MathMax(1, s - expH);
-      for(int j = s - 1; j >= stop; j--)
-        {
-         if(dir > 0)
-           {
-            if(g_rates[j].low <= sl)   { resolved = true; break; }   // SL first = loss (conservative)
-            if(g_rates[j].high >= tp1) { wins++; resolved = true; break; }
-           }
-         else
-           {
-            if(g_rates[j].high >= sl)  { resolved = true; break; }
-            if(g_rates[j].low  <= tp1) { wins++; resolved = true; break; }
-           }
-        }
-      if(resolved) total++;
-     }
-  }
-
-//====================================================================//
-//  DRAWING                                                           //
-//====================================================================//
-
-void DrawSignalArrowAt(int shift, int dir, bool strong)
-  {
-   datetime t = g_rates[shift].time;
-   string name = OBJ_PREFIX + "SIG_" + IntegerToString((long)t);
-   double price;
-   if(dir > 0)
-     {
-      price = g_rates[shift].low - 0.4 * g_atr[shift];
-      if(ObjectCreate(0, name, OBJ_ARROW, 0, t, price))
-        {
-         ObjectSetInteger(0, name, OBJPROP_ARROWCODE, 233);
-         ObjectSetInteger(0, name, OBJPROP_ANCHOR, ANCHOR_TOP);
-         ObjectSetInteger(0, name, OBJPROP_COLOR, strong ? clrLime : clrDarkGray);
-        }
-     }
-   else
-     {
-      price = g_rates[shift].high + 0.4 * g_atr[shift];
-      if(ObjectCreate(0, name, OBJ_ARROW, 0, t, price))
-        {
-         ObjectSetInteger(0, name, OBJPROP_ARROWCODE, 234);
-         ObjectSetInteger(0, name, OBJPROP_ANCHOR, ANCHOR_BOTTOM);
-         ObjectSetInteger(0, name, OBJPROP_COLOR, strong ? clrTomato : clrDarkGray);
-        }
-     }
-   ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
-   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
-   ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
-  }
-
-void DrawSignalArrow(const SPattern &pat, bool strong)
-  {
-   DrawSignalArrowAt(pat.shift, pat.direction, strong);
-  }
-
-void ForecastDrawLevels()
-  {
-   string names[4] = { OBJ_PREFIX+"LVL_ENTRY", OBJ_PREFIX+"LVL_SL", OBJ_PREFIX+"LVL_TP1", OBJ_PREFIX+"LVL_TP2" };
-   bool active = (g_fc.used && g_fc.status == FC_ACTIVE);
-
-   for(int i = 0; i < 4; i++)
-      if(ObjectFind(0, names[i]) >= 0)
-         ObjectDelete(0, names[i]);
-
-   if(!active)
-      return;
-
-   color cEntry = clrDodgerBlue, cSL = clrRed, cTP = clrLime;
-   HLine(names[0], g_fc.entry, cEntry, STYLE_SOLID,  "Entry");
-   HLine(names[1], g_fc.sl,    cSL,    STYLE_SOLID,  "Stop loss");
-   HLine(names[2], g_fc.tp1,   cTP,    STYLE_DASH,   "TP1");
-   HLine(names[3], g_fc.tp2,   cTP,    STYLE_DASH,   "TP2");
-  }
-
-void HLine(string name, double price, color clr, int style, string tip)
-  {
-   if(!ObjectCreate(0, name, OBJ_HLINE, 0, 0, price))
-      return;
-   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
-   ObjectSetInteger(0, name, OBJPROP_STYLE, style);
-   ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
-   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
-   ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
-   ObjectSetInteger(0, name, OBJPROP_BACK, true);
-   ObjectSetString(0, name, OBJPROP_TEXT, tip);
-  }
-
-void DrawResolveLabel(int status, double price)
-  {
-   datetime t = g_rates[1].time;
-   string name = OBJ_PREFIX + "RES_" + IntegerToString((long)t);
-   string txt = "";
-   color clr = clrGray;
-   if(status == FC_TP1)          { txt = "TP1 OK";   clr = clrLime; }
-   if(status == FC_TP2)          { txt = "TP2 OK";   clr = clrLime; }
-   if(status == FC_SL)           { txt = "SL X";     clr = clrTomato; }
-   if(status == FC_EXPIRED)      { txt = "expired";  clr = clrGold; }
-   if(status == FC_CANCELLED)    { txt = "cancelled";clr = clrGray; }
-   if(txt == "") return;
-   if(ObjectCreate(0, name, OBJ_TEXT, 0, t, price))
-     {
-      ObjectSetString(0, name, OBJPROP_TEXT, txt);
-      ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
-      ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 8);
-      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
-      ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
-      ObjectSetInteger(0, name, OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
-     }
-  }
-
-//====================================================================//
-//  ALERTS                                                            //
-//====================================================================//
-
-string AlertText(bool validated)
-  {
-   string tf = StringSubstr(EnumToString(_Period), 7);
-   if(validated)   // stage 3: a PROVEN idea -> full forward forecast
-      return("SmartTrader FORECAST: " + (g_fc.dir > 0 ? "BUY " : "SELL ") + g_fc.patternName +
-             " PROVED | " + _Symbol + " " + tf +
-             " | score " + IntegerToString(g_fc.score) + "/" + IntegerToString(g_fc.maxScore) +
-             "\nEntry " + DoubleToString(g_fc.entry, _Digits) +
-             "  SL " + DoubleToString(g_fc.sl, _Digits) +
-             "  TP1 " + DoubleToString(g_fc.tp1, _Digits) +
-             "  TP2 " + DoubleToString(g_fc.tp2, _Digits) +
-             "\nHorizon " + IntegerToString(g_fc.expiryBars) + " bars (~" +
-             IntegerToString(g_fc.expBars) + " to TP1), until " +
-             TimeToString(g_fc.tExpire, TIME_DATE | TIME_MINUTES) +
-             "\nProjection: measured move of the prior leg, floor 1R/2R" +
-             "\n" + g_histNote);
-   // stage 1/2 message: candidate waiting for proof
-   string dir  = (g_lastPat.direction > 0 ? "BUY" : "SELL");
-   return("SmartTrader CANDIDATE: " + dir + " " + g_lastPat.name +
-          " (" + SetupTypeName(g_setupType) + ") | " + _Symbol + " " + tf +
-          " | score " + IntegerToString(g_score) + "/" + IntegerToString(g_maxScore) +
-          " | proof needed: close " + (g_lastPat.direction > 0 ? "above " : "below ") +
-          DoubleToString(g_lastPat.direction > 0 ? HighestHigh(g_lastPat.shift, PatternSpan(g_lastPat.code))
-                                                 : LowestLow(g_lastPat.shift, PatternSpan(g_lastPat.code)), _Digits) +
-          " within " + IntegerToString(CONFIRM_BARS) + " bars");
-  }
-
-void Notify(string text)
-  {
-   Print(text);
-   if(InpAlertPopup) Alert(text);
-   if(InpAlertPush)
-     {
-      if(!SendNotification(text))
-         Print("SmartTrader: push notification failed, error ", GetLastError());
-     }
-   if(InpAlertEmail)
-     {
-      if(!SendMail("SmartTrader signal", text))
-         Print("SmartTrader: e-mail failed, error ", GetLastError());
-     }
-  }
-
-//====================================================================//
-//  PANEL                                                             //
-//====================================================================//
-
-string Marker(int state)
-  {
-   if(state == CK_PASS) return("OK ");
-   if(state == CK_FAIL) return("no ");
-   return("-- ");
-  }
-
-color DirColor(int d)
-  {
-   if(d > 0) return(clrLime);
-   if(d < 0) return(clrTomato);
-   return(clrGold);
-  }
-
-string PanelCheckLine(int from, int to)
-  {
-   string s = "";
-   for(int i = from; i < to && i < g_checkCount; i++)
-     {
-      if(s != "") s += "  ";
-      s += g_checks[i].name + " " + Marker(g_checks[i].state);
-     }
-   return(s);
-  }
-
-string FormingCandleText()
-  {
-   if(g_window < 2) return("");
-   double b = Body(0), r = Range(0);
-   if(r <= 0) return("forming candle: flat");
-   int pct = (int)MathRound(100.0 * b / r);
-   string mood = BullBar(0) ? "bullish" : (BearBar(0) ? "bearish" : "flat");
-   string wick = "";
-   if(LoWick(0) > 2.0 * MathMax(b, 0.1 * r)) wick = ", long lower wick (possible hammer forming)";
-   if(UpWick(0) > 2.0 * MathMax(b, 0.1 * r)) wick = ", long upper wick (possible shooting star forming)";
-   return("forming candle: " + mood + ", body " + IntegerToString(pct) + "% of range" + wick);
-  }
-
-string CountdownText()
-  {
-   datetime cur = iTime(_Symbol, _Period, 0);
-   long left = (long)(cur + PeriodSeconds(_Period) - TimeCurrent());
-   if(left < 0) left = 0;
-   long mm = left / 60, ss = left % 60;
-   return("candle closes in " + IntegerToString((int)mm) + ":" +
-          (ss < 10 ? "0" : "") + IntegerToString((int)ss));
-  }
-
-void PanelRender()
-  {
-   string rows[MAX_ROWS];
-   color  rc[MAX_ROWS];
-   int n = 0;
-
-   //--- header ---------------------------------------------------------
-   rows[n] = "SmartTrader v1.5 - Phase 1: Market Watch & Forecast  |  style: " + StyleName(); rc[n] = clrGold;      n++;
-   rows[n] = _Symbol + "  " + StringSubstr(EnumToString(_Period), 7) +
-             "  spread " + IntegerToString((int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD)) + " pts" +
-             (g_statusMsg != "" ? "   [" + g_statusMsg + "]" : "");
-   rc[n] = clrSilver; n++;
-
-   if(!g_dataOK)
-     {
-      rows[n] = "Waiting for data..."; rc[n] = clrGray; n++;
-      PanelShow(rows, rc, n);
-      return;
-     }
-
-   //--- trend ----------------------------------------------------------
-   rows[n] = "TREND  " + TrendStateText(g_trend.state) +
-             "  ADX " + DoubleToString(g_trend.adx, 1) +
-             "  +DI " + DoubleToString(g_trend.pdi, 1) + " / -DI " + DoubleToString(g_trend.mdi, 1);
-   rc[n] = DirColor(g_trend.dir); n++;
-   rows[n] = "EMA20 " + DoubleToString(g_trend.ema20, _Digits) +
-             (g_trend.ema20 > g_trend.ema50 ? " > " : (g_trend.ema20 < g_trend.ema50 ? " < " : " = ")) +
-             "EMA50 " + DoubleToString(g_trend.ema50, _Digits) +
-             "  |  " + (g_trend.note != "" ? g_trend.note : "");
-   rc[n] = clrSilver; n++;
-   double atr1 = g_atr[1];
-   double spd  = AvgSpeed(50, 1);
-   rows[n] = "ATR(" + IntegerToString(ATR_PERIOD) + ") " +
-             DoubleToString(atr1 / _Point, 0) + " pts  |  avg speed " +
-             DoubleToString(spd / _Point, 1) + " pts/bar" +
-             (g_dynOK ? (g_volRegime > 0 ? "  |  volatility: EXPANDING" :
-                        (g_volRegime < 0 ? "  |  volatility: CONTRACTING" : "  |  volatility: normal")) : "");
-   rc[n] = clrSilver; n++;
-   rows[n] = g_dynNote;
-   rc[n]  = (g_dynOK ? clrDeepSkyBlue : clrGray); n++;
-   rows[n] = "context: CHOP " + DoubleToString(g_chop1, 1) +
-             (g_chop1 >= CHOP_CHOPPY ? " (choppy/range)" :
-              (g_chop1 <= CHOP_TREND ? " (trending)" : " (transition)")) +
-             "  |  squeeze " + g_squeezeState;
-   rc[n]  = (g_chop1 >= CHOP_CHOPPY ? clrGold : (g_chop1 <= CHOP_TREND ? clrLime : clrSilver)); n++;
-
-   //--- candle read ------------------------------------------------------
-   rows[n] = "LAST CLOSED CANDLE"; rc[n] = clrGold; n++;
-   if(g_hasPat && g_lastPat.direction != 0)
-     {
-      string ptxt = g_lastPat.name + " (" + SetupTypeName(g_setupType) + ", strength " +
-                    IntegerToString(g_lastPat.strength) + "/3) -> " +
-                    (g_lastPat.direction > 0 ? "bullish" : "bearish") + " read";
-      rows[n] = ptxt; rc[n] = DirColor(g_lastPat.direction); n++;
-     }
-   else
-     {
-      rows[n] = "no qualified reversal/continuation pattern"; rc[n] = clrSilver; n++;
-     }
-   rows[n] = FormingCandleText() + "  |  " + CountdownText(); rc[n] = clrSilver; n++;
-
-   //--- validation --------------------------------------------------------
-   rows[n] = "VALIDATION (indicator tools)"; rc[n] = clrGold; n++;
-   if(g_hasPat && g_checkCount > 0)
-     {
-      rows[n] = PanelCheckLine(0, 3);  rc[n] = clrSilver; n++;
-      rows[n] = PanelCheckLine(3, 6);  rc[n] = clrSilver; n++;
-      rows[n] = PanelCheckLine(6, 8);  rc[n] = clrSilver; n++;
-      string dec;
-      if(g_decision == DEC_VALID)      dec = "VALIDATED - candidate opened, awaiting proof";
-      else if(g_decision == DEC_WATCH) dec = "WATCHLIST - not confirmed yet";
-      else                             dec = "ignored";
-      rows[n] = "Score " + IntegerToString(g_score) + "/" + IntegerToString(g_maxScore) +
-                " -> " + dec +
-                (g_decisionNote != "" ? "  (" + g_decisionNote + ")" : "");
-      rc[n] = (g_decision == DEC_VALID ? clrLime : (g_decision == DEC_WATCH ? clrGold : clrSilver));
-      n++;
-     }
-   else
-     {
-      rows[n] = "waiting for a setup to validate"; rc[n] = clrSilver; n++;
-     }
-
-   //--- candidate (stage 2) --------------------------------------------------
-   rows[n] = "CANDIDATE - PROOF WINDOW"; rc[n] = clrGold; n++;
-   if(g_pend.used)
-     {
-      rows[n] = (g_pend.dir > 0 ? "BUY " : "SELL ") + g_pend.patternName + " detected " +
-                TimeToString(g_pend.tDetect, TIME_MINUTES) + "  score " +
-                IntegerToString(g_pend.score) + "/" + IntegerToString(g_pend.maxScore) +
-                "  - proof left " + IntegerToString(g_pend.confirmLeft) + "/" +
-                IntegerToString(g_pend.confirmBars) + " bars";
-      rc[n] = DirColor(g_pend.dir); n++;
-      rows[n] = "true if close " + (g_pend.dir > 0 ? "> " : "< ") +
-                DoubleToString(g_pend.dir > 0 ? g_pend.zoneHigh : g_pend.zoneLow, _Digits) +
-                "   |   FALSE if close " + (g_pend.dir > 0 ? "< " : "> ") +
-                DoubleToString(g_pend.dir > 0 ? g_pend.zoneLow : g_pend.zoneHigh, _Digits);
-      rc[n] = clrSilver; n++;
-     }
-   else
-     {
-      rows[n] = (g_pendNote == "" ? "none - validated setups appear here for proof" : "last: " + g_pendNote);
-      rc[n] = (StringFind(g_pendNote, "FAILED") >= 0 ? clrTomato :
-              (StringFind(g_pendNote, "PROVED") >= 0 ? clrLime : clrSilver));
-      n++;
-     }
-
-   //--- forecast (stage 3) -----------------------------------------------------
-   rows[n] = "FORECAST - FORWARD HORIZON"; rc[n] = clrGold; n++;
-   if(g_fc.used && g_fc.status == FC_ACTIVE)
-     {
-      int fage = (int)((TimeCurrent() - g_fc.tSignal) / PeriodSeconds(_Period));
-      rows[n] = (g_fc.dir > 0 ? "BUY " : "SELL ") + g_fc.patternName + "  age " +
-                IntegerToString(fage) + "/" + IntegerToString(g_fc.expiryBars) + " bars  score " +
-                IntegerToString(g_fc.score) + "/" + IntegerToString(g_fc.maxScore);
-      rc[n] = DirColor(g_fc.dir); n++;
-      rows[n] = "Entry " + DoubleToString(g_fc.entry, _Digits) +
-                "  SL " + DoubleToString(g_fc.sl, _Digits) +
-                " (" + DoubleToString(MathAbs(g_fc.entry - g_fc.sl) / _Point, 0) + " pts)" +
-                "  TP1 " + DoubleToString(g_fc.tp1, _Digits) +
-                "  TP2 " + DoubleToString(g_fc.tp2, _Digits);
-      rc[n] = clrSilver; n++;
-      rows[n] = "~" + IntegerToString(g_fc.expBars) + " bars to TP1  |  expires in " +
-                IntegerToString(g_fc.barsLeft) + " bars (" +
-                TimeToString(g_fc.tExpire, TIME_MINUTES) + ")";
-      // live schedule check: is the move following the projected path?
-      double denom = (g_fc.dir > 0 ? g_fc.tp1 - g_fc.entry : g_fc.entry - g_fc.tp1);
-      if(denom > 0)
-        {
-         double progA = (g_fc.dir > 0 ? (g_rates[0].close - g_fc.entry)
-                                      : (g_fc.entry - g_rates[0].close)) / denom;
-         int elapsed = (int)((TimeCurrent() - g_fc.tSignal) / PeriodSeconds(_Period));
-         double progE = (g_fc.expBars > 0 ? (double)elapsed / g_fc.expBars : 0.0);
-         if(progA < 0) progA = 0;
-         if(progA > 1) progA = 1;
-         if(progE > 1) progE = 1;
-         bool onTrack = (progA >= progE * 0.7);
-         rows[n] = "horizon " + IntegerToString(g_fc.expiryBars) + " bars  |  schedule: " +
-                   (onTrack ? "on track" : "behind") + " (progress " +
-                   DoubleToString(100.0 * progA, 0) + "% vs " +
-                   DoubleToString(100.0 * progE, 0) + "% expected)";
-         rc[n] = (onTrack ? clrLime : clrGold); n++;
-        }
-      rc[n] = clrSilver; n++;
-      rows[n] = g_histNote; rc[n] = clrSilver; n++;
-     }
-   else if(g_hasDone)
-     {
-      rows[n] = "last forecast: " + StatusText(g_lastDone.status) + "  " +
-                (g_lastDone.dir > 0 ? "BUY " : "SELL ") + g_lastDone.patternName +
-                "  " + TimeToString(g_lastDone.tSignal, TIME_MINUTES);
-      rc[n] = DirColor(g_lastDone.dir); n++;
-      rows[n] = "recent: " + RecentText(); rc[n] = clrSilver; n++;
-     }
-   else
-     {
-      rows[n] = "no active forecast"; rc[n] = clrSilver; n++;
-     }
-
-   rows[n] = "tracked this session: " + IntegerToString(g_statW) + "W / " +
-             IntegerToString(g_statL) + "L / " + IntegerToString(g_statX) + "X / " +
-             IntegerToString(g_statC) + "C"; rc[n] = clrSilver; n++;
-
-   rows[n] = "Phase 1: observation only - no orders are placed"; rc[n] = clrGray; n++;
-
-   PanelShow(rows, rc, n);
-  }
-
-string RecentText()
-  {
-   string s = "";
-   for(int i = 0; i < g_recentN; i++)
-     {
-      if(s != "") s += " / ";
-      s += g_recent[i];
-     }
-   return(s);
-  }
-
-void PanelShow(string &rows[], color &rc[], int n)
-  {
-   int rowH   = InpFontSize + 6;
-   int width  = (int)MathMax(430, 78 * InpFontSize);
-   int height = n * rowH + 16;
-
-   string bg = OBJ_PREFIX + "BG";
+   int rowH = PANEL_FONT + 7;
+   int height = n*rowH + 14;
+   string bg = pfx + "BG";
    if(ObjectFind(0, bg) < 0)
      {
       ObjectCreate(0, bg, OBJ_RECTANGLE_LABEL, 0, 0, 0);
-      ObjectSetInteger(0, bg, OBJPROP_BGCOLOR, C'16,20,30');
+      ObjectSetInteger(0, bg, OBJPROP_BGCOLOR, CLR_BG);
       ObjectSetInteger(0, bg, OBJPROP_BORDER_TYPE, BORDER_FLAT);
-      ObjectSetInteger(0, bg, OBJPROP_COLOR, clrDimGray);
+      ObjectSetInteger(0, bg, OBJPROP_COLOR, CLR_BORDER);
       ObjectSetInteger(0, bg, OBJPROP_SELECTABLE, false);
       ObjectSetInteger(0, bg, OBJPROP_HIDDEN, true);
       ObjectSetInteger(0, bg, OBJPROP_BACK, false);
      }
-   ObjectSetInteger(0, bg, OBJPROP_CORNER, InpPanelCorner);
-   ObjectSetInteger(0, bg, OBJPROP_XDISTANCE, 6);
-   ObjectSetInteger(0, bg, OBJPROP_YDISTANCE, 6);
+   ObjectSetInteger(0, bg, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, bg, OBJPROP_XDISTANCE, x0);
+   ObjectSetInteger(0, bg, OBJPROP_YDISTANCE, y0);
    ObjectSetInteger(0, bg, OBJPROP_XSIZE, width);
    ObjectSetInteger(0, bg, OBJPROP_YSIZE, height);
 
-   int anchor = ANCHOR_LEFT_UPPER;
-   if(InpPanelCorner == CORNER_RIGHT_UPPER) anchor = ANCHOR_RIGHT_UPPER;
-   if(InpPanelCorner == CORNER_LEFT_LOWER)  anchor = ANCHOR_LEFT_LOWER;
-   if(InpPanelCorner == CORNER_RIGHT_LOWER) anchor = ANCHOR_RIGHT_LOWER;
-
-   for(int i = 0; i < MAX_ROWS; i++)
+   for(int i=0; i<64; i++)
      {
-      string nm = OBJ_PREFIX + "R" + IntegerToString(i);
+      string nm = pfx + "R" + IntegerToString(i);
       if(i >= n)
         {
          if(ObjectFind(0, nm) >= 0) ObjectDelete(0, nm);
@@ -2122,22 +1361,273 @@ void PanelShow(string &rows[], color &rc[], int n)
         {
          ObjectCreate(0, nm, OBJ_LABEL, 0, 0, 0);
          ObjectSetString(0, nm, OBJPROP_FONT, "Consolas");
-         ObjectSetInteger(0, nm, OBJPROP_FONTSIZE, InpFontSize);
+         ObjectSetInteger(0, nm, OBJPROP_FONTSIZE, PANEL_FONT);
          ObjectSetInteger(0, nm, OBJPROP_SELECTABLE, false);
          ObjectSetInteger(0, nm, OBJPROP_HIDDEN, true);
-         ObjectSetInteger(0, nm, OBJPROP_ANCHOR, anchor);
+         ObjectSetInteger(0, nm, OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
         }
-      ObjectSetInteger(0, nm, OBJPROP_CORNER, InpPanelCorner);
-      int x = 14, y;
-      if(InpPanelCorner == CORNER_LEFT_LOWER || InpPanelCorner == CORNER_RIGHT_LOWER)
-         y = height - 12 - i * rowH;
-      else
-         y = 12 + i * rowH;
-      ObjectSetInteger(0, nm, OBJPROP_XDISTANCE, x);
-      ObjectSetInteger(0, nm, OBJPROP_YDISTANCE, y);
+      ObjectSetInteger(0, nm, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, nm, OBJPROP_XDISTANCE, x0 + 10);
+      ObjectSetInteger(0, nm, OBJPROP_YDISTANCE, y0 + 8 + i*rowH);
       ObjectSetString(0, nm, OBJPROP_TEXT, rows[i]);
-      ObjectSetInteger(0, nm, OBJPROP_COLOR, rc[i]);
+      ObjectSetInteger(0, nm, OBJPROP_COLOR, cols[i]);
      }
    ChartRedraw(0);
+  }
+
+string MarketStateText()
+  {
+   if(g_msState==MS_OPEN)   return("OPEN" + (g_msNote!="" ? "  (" + g_msNote + ")" : ""));
+   if(g_msState==MS_CLOSED) return("CLOSED");
+   return("HOLD");
+  }
+
+string DeclLine(const SDecl &d, bool compact)
+  {
+   string dir = (d.dir>0 ? "BUY" : "SELL");
+   string base = "[" + (d.tfSlot==0 ? "M5" : "M15") + "] " + dir + "  " + d.branch +
+                 "  @ " + TimeToString(d.tDeclare, TIME_MINUTES);
+   if(compact) return(base);
+   return(base +
+          "\nentry " + DoubleToString(d.entry,_Digits) +
+          "  SL " + DoubleToString(d.sl,_Digits) +
+          "  TP1 " + DoubleToString(d.tp1,_Digits) +
+          "  TP2 " + DoubleToString(d.tp2,_Digits) +
+          "  lot " + DoubleToString(d.lots,2) +
+          "\nduration ~" + IntegerToString(d.durBars) + " bars to TP1 | time-stop " +
+          IntegerToString(d.timeStop) + " bars" +
+          " | mgmt: partial@TP1, BE after partial");
+  }
+
+void CleanupDetails()
+  {
+   if(ObjectFind(0, OBJ_P+"D_BG") >= 0) ObjectDelete(0, OBJ_P+"D_BG");
+   for(int i=0; i<64; i++)
+     {
+      string nm = OBJ_P+"D_R"+IntegerToString(i);
+      if(ObjectFind(0, nm) >= 0) ObjectDelete(0, nm);
+     }
+  }
+
+void RenderAll()
+  {
+   string mr[]; color mc[]; int mn=0;
+   ArrayResize(mr, 40); ArrayResize(mc, 40);
+
+   AddRow(mr, mc, mn, "SmartTrader Mi1 - the brain (no orders)", CLR_HEAD);
+
+   string symType = g_pr.typeName;
+   AddRow(mr, mc, mn,
+          _Symbol + " [" + symType + "]  " + MarketStateText() +
+          "  spread " + IntegerToString((int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD)) + " pts",
+          (g_msState==MS_OPEN ? CLR_NEUT : CLR_ATT));
+
+   if(g_msState != MS_OPEN)
+     {
+      if(g_msState==MS_CLOSED && g_msNote != "")
+         AddRow(mr, mc, mn, g_msNote, CLR_ATT);
+      if(g_msState==MS_HOLD && g_msNote != "")
+         AddRow(mr, mc, mn, g_msNote, CLR_ATT);
+      AddRow(mr, mc, mn, "forecasting paused - market not open", CLR_DIM);
+      PaintPanel(OBJ_P+"M_", 8, 8, MAIN_W, mr, mc, mn);
+      CleanupDetails();
+      return;
+     }
+
+   // countdown (chart timeframe)
+   datetime cb = iTime(_Symbol, _Period, 0);
+   long left = (long)(cb + PeriodSeconds(_Period) - TimeCurrent());
+   if(left < 0) left = 0;
+   AddRow(mr, mc, mn, "chart TF " + StringSubstr(EnumToString(_Period),7) +
+          "  |  bar closes in " + IntegerToString((int)(left/60)) + ":" +
+          (left%60<10 ? "0" : "") + IntegerToString((int)(left%60)) +
+          "  |  risk " + DoubleToString(InpRiskPercent,1) + "%/trade", CLR_DIM);
+
+   // trend read (both timeframes, F2)
+   for(int s=0; s<2; s++)
+     {
+      string ln = g_tf[s].tfName + ": " + (g_tf[s].ready ? g_tf[s].trendLine : "warming up...");
+      color lc = (g_tf[s].tDir>0 ? CLR_UP : (g_tf[s].tDir<0 ? CLR_DN : CLR_NEUT));
+      AddRow(mr, mc, mn, ln, lc);
+     }
+
+   // declaration (most recent active, else none) - section 5
+   AddRow(mr, mc, mn, "DECLARATION", CLR_HEAD);
+   int showSlot=-1;
+   for(int s=0; s<2; s++)
+      if(g_tf[s].decl.active) { showSlot = s; break; }
+   if(showSlot < 0)
+     {
+      // most recent resolved?
+      if(g_memN > 0)
+         AddRow(mr, mc, mn, "no active declaration - last: " +
+                (g_mem[0].dir>0?"BUY ":"SELL ") + g_mem[0].branch + " -> " + g_memNote[0], CLR_DIM);
+      else
+         AddRow(mr, mc, mn, "no active declaration - waiting for a branch execution", CLR_DIM);
+     }
+   else
+     {
+      string dl = DeclLine(g_tf[showSlot].decl, false);
+      bool firstLine = true;
+      int start=0;
+      while(start < StringLen(dl))
+        {
+         int p = StringFind(dl, "\n", start);
+         string part = (p<0 ? StringSubstr(dl, start) : StringSubstr(dl, start, p-start));
+         AddRow(mr, mc, mn, part, (firstLine ? CLR_ENTRY : CLR_NEUT));
+         firstLine = false;
+         if(p<0) break;
+         start = p+1;
+        }
+     }
+
+   // memory line (compact)
+   if(g_memN > 0)
+     {
+      string mem = "memory: ";
+      for(int i=0; i<MathMin(g_memN,3); i++)
+        {
+         if(i>0) mem += " | ";
+         mem += (g_mem[i].dir>0?"BUY ":"SELL ") + OutcomeText(g_mem[i].outcome);
+        }
+      AddRow(mr, mc, mn, mem, CLR_DIM);
+     }
+
+   // event line (section 6)
+   AddRow(mr, mc, mn, "event: " + (g_eventN>0 ? g_events[0] : "none yet"), CLR_ATT);
+
+   PaintPanel(OBJ_P+"M_", 8, 8, MAIN_W, mr, mc, mn);
+
+   //--- details panel (right of main panel)
+   if(!InpShowDetails)
+     {
+      CleanupDetails();
+      return;
+     }
+
+   string dr[]; color dc[]; int dn=0;
+   int capD = 60;
+   ArrayResize(dr, capD); ArrayResize(dc, capD);
+
+   AddRow(dr, dc, dn, "DETAILS - analyst view", CLR_HEAD);
+   for(int s=0; s<2; s++)
+     {
+      AddRow(dr, dc, dn, "[" + g_tf[s].tfName + "] trend: " +
+             (g_tf[s].ready ? g_tf[s].trendLine : "warming up..."), CLR_NEUT);
+      if(!g_tf[s].ready) continue;
+      AddRow(dr, dc, dn, "[" + g_tf[s].tfName + "] vwap " + DoubleToString(g_tf[s].vwap,_Digits) +
+             "  speed " + DoubleToString(g_tf[s].speed/_Point,1) + " pts/bar", CLR_DIM);
+      AddRow(dr, dc, dn, "[" + g_tf[s].tfName + "] MAP " + IntegerToString(g_tf[s].nZones) +
+             " zones  -  " + g_tf[s].locLine, CLR_HEAD);
+      for(int z=0; z<g_tf[s].nZones; z++)
+        {
+         string role = (g_tf[s].zones[z].price > g_tf[s].r[1].close ? "RES" : "SUP");
+         if(g_tf[s].zones[z].brokenDir != 0) role += "(flipped)";
+         if(g_tf[s].zones[z].isLifeline)     role += "(LIFE)";
+         AddRow(dr, dc, dn,
+                " " + role + " " + DoubleToString(g_tf[s].zones[z].price,_Digits) +
+                "  s" + DoubleToString(g_tf[s].zones[z].strength,0) +
+                "  t" + IntegerToString(g_tf[s].zones[z].touches) + "x" +
+                "  [" + g_tf[s].zones[z].tagStr + "]" +
+                "  slB " + DoubleToString(g_tf[s].zones[z].slForBuy,_Digits) +
+                " slS " + DoubleToString(g_tf[s].zones[z].slForSell,_Digits),
+                (g_tf[s].zones[z].strength>=60 ? CLR_ATT : CLR_NEUT));
+        }
+      AddRow(dr, dc, dn, "[" + g_tf[s].tfName + "] VERDICT", CLR_HEAD);
+      for(int b=0; b<3; b++)
+        {
+         if(!g_tf[s].br[b].used) continue;
+         string bl = " " + g_tf[s].br[b].name +
+                     " -> " + DoubleToString(g_tf[s].br[b].target1,_Digits) +
+                     " (~" + IntegerToString(g_tf[s].br[b].bars) + " bars)" +
+                     " inv " + DoubleToString(g_tf[s].br[b].invalid,_Digits);
+         color bc = CLR_NEUT;
+         if(StringFind(g_tf[s].trackLine, g_tf[s].br[b].name) >= 0) { bl += "  <== tracking"; bc = CLR_ATT; }
+         if(g_tf[s].br[b].status == BR_EXEC) { bl += "  [EXECUTED]"; bc = CLR_UP; }
+         AddRow(dr, dc, dn, bl, bc);
+        }
+      AddRow(dr, dc, dn, "[" + g_tf[s].tfName + "] DECLARATION", CLR_HEAD);
+      if(g_tf[s].decl.active)
+        {
+         string dl = DeclLine(g_tf[s].decl, false);
+         int start=0;
+         while(start < StringLen(dl))
+           {
+            int p = StringFind(dl, "\n", start);
+            string part = (p<0 ? StringSubstr(dl,start) : StringSubstr(dl,start,p-start));
+            AddRow(dr, dc, dn, " " + part, CLR_ENTRY);
+            if(p<0) break;
+            start = p+1;
+           }
+        }
+      else
+         AddRow(dr, dc, dn, " none active", CLR_DIM);
+      AddRow(dr, dc, dn, "", CLR_NEUT);
+     }
+   AddRow(dr, dc, dn, "EVENTS", CLR_HEAD);
+   for(int i=0; i<MathMin(g_eventN,6); i++)
+      AddRow(dr, dc, dn, " " + g_events[i], CLR_DIM);
+
+   // geometry: right of main panel, same top line
+   int chartW = (int)ChartGetInteger(0, CHART_WIDTH_IN_PIXELS, 0);
+   int dW = 470;
+   if(chartW > 100) dW = (int)MathMin(470.0, MathMax(300.0, chartW*0.55));
+   PaintPanel(OBJ_P+"D_", 8 + MAIN_W + 12, 8, dW, dr, dc, dn);
+  }
+
+//====================================================================//
+//  EVENT HANDLERS                                                    //
+//====================================================================//
+
+int OnInit()
+  {
+   //--- F1: timeframe guard
+   if(_Period != PERIOD_M5 && _Period != PERIOD_M15)
+     {
+      Alert("SmartTrader: out of range timeframe - return to M5/M15. Current: ",
+            EnumToString(_Period));
+      return(INIT_FAILED);
+     }
+
+   //--- F4: symbol type + F5 profile
+   InitProfile(ClassifySymbol(_Symbol));
+
+   //--- F2: both timeframe brains
+   g_tf[0].Configure(PERIOD_M5,  "M5",  0);
+   g_tf[1].Configure(PERIOD_M15, "M15", 1);
+
+   //--- F3: market state first
+   UpdateMarketState();
+
+   EventSetTimer(1);
+   Print("SmartTrader Mi1 started on ", _Symbol, " [", g_pr.typeName, "] chart ",
+         EnumToString(_Period), " - brain only: trend, map, verdict, declarations. No orders.");
+   RenderAll();
+   return(INIT_SUCCEEDED);
+  }
+
+void OnDeinit(const int reason)
+  {
+   EventKillTimer();
+   ObjectsDeleteAll(0, OBJ_P);
+   ChartRedraw(0);
+   Print("SmartTrader Mi1 stopped (reason ", reason, ").");
+  }
+
+void OnTick()
+  {
+   UpdateMarketState();                    // F3: state first, every tick
+   if(g_msState == MS_OPEN)
+     {
+      g_tf[0].OnNewBar();                  // F2: both TFs, each on own nature
+      g_tf[1].OnNewBar();
+     }
+   RenderAll();
+  }
+
+void OnTimer()
+  {
+   UpdateMarketState();
+   RenderAll();
   }
 //+------------------------------------------------------------------+
