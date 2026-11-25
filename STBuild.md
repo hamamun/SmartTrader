@@ -153,13 +153,17 @@ detects which branch the market is making true, verifies, declares.
 the fixed TP1 — "the TP fixation process is not correct." Redesigned:
 
 - **ONE target only.** TP2 removed entirely. A declaration carries a single TP.
-- **Initial target = the nearest NATURAL PAUSE**: the closest minor swing shelf
-  in the trade direction that leaves at least 0.8R (trending) / 0.6R (choppy)
-  reward and sits at least 0.2 ATR beyond entry — never an invented price.
-  No shelf on the map → ATR projection (1.2×ATR). The target is capped just
-  before the next map zone (any strength). If even the floor (0.8R) does not
-  fit before that zone, the setup is PASSED — "not every setup deserves a
-  trade."
+- **Initial target = the NATURAL DESTINATION, planned like a human.** At
+  planning the trader states not just the direction but the PORTION the move
+  should travel - where it naturally ends: fading/reversing the last leg aims
+  at its far end (full retrace = the opposite edge of the range); riding the
+  last leg aims at its 1.272 extension (the measured portion the structure
+  promises). Fallback when no leg is on the map: nearest minor swing shelf
+  (>= 0.8R trending / >= 0.6R choppy, >= 0.2 ATR beyond entry) - never an
+  invented price. The destination must still pay for the risk (the minR
+  floor) and fit on the road: capped just before the next map zone (any
+  strength); if the floor does not fit before that zone, the setup is PASSED
+  - "not every setup deserves a trade."
 - **The target is LIVING.** After declaration the bot does what the human
   described — keeps checking every closed candle: if the move is still healthy,
   the TP is extended to the next natural pause; if the candles start
@@ -169,6 +173,14 @@ the fixed TP1 — "the TP fixation process is not correct." Redesigned:
   event line and the panel shows "(updated Nx by candles)".
 - **Management:** partial at +1R (half banked), stop to breakeven, remainder
   rides the living TP.
+- **Tighten safety (bugfix after live test):** a tightened target may NEVER
+  cross back through the entry (a BUY's TP stays above entry, a SELL's below).
+  Tighten only arms once the move has >= 0.5R of substance (before that the SL
+  protects and early jitter must not chase the target). If no natural pause
+  remains past the entry, the move has failed -> the declaration closes early
+  with an honest "closed early" outcome instead of aiming at an impossible
+  target. Stopped-at-breakeven is reported as such in memory, not as an
+  invalidation.
 
 ---
 
