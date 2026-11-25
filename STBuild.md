@@ -148,6 +148,28 @@ detects which branch the market is making true, verifies, declares.
 6. Output: declaration panel/alert (branch name, entry/SL/TP/lot/duration,
    management). Placing REAL orders stays Phase 2 (Step 7).
 
+**AMENDMENT (approved after Mi1 live observation, 2025-11):** the user watched
+4 hours of live BTCUSDm M5: direction followed, but price kept reversing before
+the fixed TP1 — "the TP fixation process is not correct." Redesigned:
+
+- **ONE target only.** TP2 removed entirely. A declaration carries a single TP.
+- **Initial target = the nearest NATURAL PAUSE**: the closest minor swing shelf
+  in the trade direction that leaves at least 0.8R (trending) / 0.6R (choppy)
+  reward and sits at least 0.2 ATR beyond entry — never an invented price.
+  No shelf on the map → ATR projection (1.2×ATR). The target is capped just
+  before the next map zone (any strength). If even the floor (0.8R) does not
+  fit before that zone, the setup is PASSED — "not every setup deserves a
+  trade."
+- **The target is LIVING.** After declaration the bot does what the human
+  described — keeps checking every closed candle: if the move is still healthy,
+  the TP is extended to the next natural pause; if the candles start
+  disagreeing, the TP is tightened to the nearest shelf (take what the market
+  gives). Health = closing-direction body + retrace giveback (≥50% warning,
+  ≥61.8% red) + higher-TF regime against the idea. Every move is logged in the
+  event line and the panel shows "(updated Nx by candles)".
+- **Management:** partial at +1R (half banked), stop to breakeven, remainder
+  rides the living TP.
+
 ---
 
 ## Mi1 UI CONTRACT (approved)
