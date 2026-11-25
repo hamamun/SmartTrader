@@ -1310,27 +1310,45 @@ public:
       if(slDist < 2.0 * (double)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) * _Point)
         { OnDeclared("selector rejected: stop tighter than 2x spread"); return; }
 
-      //--- single LIVING target: the nearest NATURAL PAUSE (minor shelf),
-      //    road-checked; never a fake invented price; skipped when no room
+      //--- single LIVING target, planned the HUMAN WAY.
+      //    At planning a trader states the PORTION the move should travel -
+      //    where this move naturally ENDS:
+      //      fading / reversing the last leg -> its FAR END (full retrace =
+      //          the opposite edge the move is travelling toward)
+      //      riding the last leg             -> its 1.272 EXTENSION (the
+      //          measured portion the structure promises)
+      //    only when no leg is on the map: nearest swing shelf / ATR view.
+      //    The target must still pay for the risk (minR) and fit on the road.
       double minR = (tRegime == TRG_TREND ? 0.8 : 0.6);   // choppy regime: accept quick pauses
       double tp = 0;
-      if(d > 0)
+      if(legDir != 0 && legHigh > legLow)
         {
-         for(int i=0; i<nHi; i++)
-           {
-            double p = swHiP[i];
-            if(p > entry + 0.2*a && p - entry >= minR*slDist && (tp == 0 || p < tp)) tp = p;
-           }
-         if(tp == 0) tp = entry + 1.2*a;                   // no shelf on the map: ATR projection
+         double size = legHigh - legLow;
+         double dest = (d > 0 ? (legDir < 0 ? legHigh : legLow + FIB_E1*size)
+                              : (legDir > 0 ? legLow  : legHigh - FIB_E1*size));
+         if(d > 0 && dest > entry + 0.2*a && dest - entry >= minR*slDist) tp = dest;
+         if(d < 0 && dest < entry - 0.2*a && entry - dest >= minR*slDist) tp = dest;
         }
-      else
+      if(tp == 0)                                          // fallback: nearest paying shelf
         {
-         for(int i=0; i<nLo; i++)
+         if(d > 0)
            {
-            double p = swLoP[i];
-            if(p < entry - 0.2*a && entry - p >= minR*slDist && (tp == 0 || p > tp)) tp = p;
+            for(int i=0; i<nHi; i++)
+              {
+               double p = swHiP[i];
+               if(p > entry + 0.2*a && p - entry >= minR*slDist && (tp == 0 || p < tp)) tp = p;
+              }
+            if(tp == 0) tp = entry + 1.2*a;                // no level on the map: ATR projection
            }
-         if(tp == 0) tp = entry - 1.2*a;
+         else
+           {
+            for(int i=0; i<nLo; i++)
+              {
+               double p = swLoP[i];
+               if(p < entry - 0.2*a && entry - p >= minR*slDist && (tp == 0 || p > tp)) tp = p;
+              }
+            if(tp == 0) tp = entry - 1.2*a;
+           }
         }
 
       // never aim beyond the nearest zone in the direction (any strength)
