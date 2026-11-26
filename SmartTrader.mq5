@@ -22,7 +22,7 @@
 //+------------------------------------------------------------------+
 #property copyright   "SmartTrader"
 #property link        "https://github.com/hamamun/SmartTrader"
-#property version     "2.10"
+#property version     "2.20"
 #property description "SmartTrader Mi1 - the brain (Steps 1-4). Forecast only, no orders."
 #property description "Reads M5+M15 on their own nature, draws the precision map, formulates"
 #property description "a living scenario tree, and declares a full plan when the market"
@@ -44,6 +44,8 @@ enum EAutoMode { AUTO_BOTH = 0,      // both timeframes trade
                };
 input bool      InpAutoTrade = false;      // AUTOTRADING master switch
 input EAutoMode InpAutoMode  = AUTO_BOTH;  // AUTOTRADING scope
+input bool      InpTrailStop = false;      // TRAIL STOP: walk stop under rest steps after +1R
+input bool      InpSLAtOrder = true;       // SL attached at order (false = bot-managed virtual stop)
 
 //====================================================================//
 //  CONSTANTS                                                         //
@@ -1235,9 +1237,10 @@ public:
                          : "min lot, no split - stop to BE+, whole rides"));
         }
 
-      //--- Option A ladder: trail the stop under the newest rest step
-      //    (structure trail; ratchet - never moves backward, ever)
-      if(decl.beArmed && slDist > 0)
+      //--- Option A ladder step 3: trail the stop under the newest rest step
+      //    (structure trail; ratchet - never moves backward, ever).
+      //    INPUT-GATED (user): steps 1-2 (bank half + lock line) always run.
+      if(InpTrailStop && decl.beArmed && slDist > 0)
         {
          double cand = 0;
          if(decl.dir > 0)
@@ -1621,9 +1624,11 @@ struct SHand
    int               replaces;      // re-placements after external vanish
    ulong             orderTicket;   // resting order ticket (0 = none)
    ulong             posTicket;     // position ticket (0 = none)
-   double            sentSL;        // last SL sent to the broker
+   double            sentSL;        // last SL sent to the broker (0 = virtual stop)
    double            sentTP;        // last TP sent to the broker
    double            sentLot;       // lot of the placed order/position
+   bool              virtSL;        // bot-managed virtual stop (no broker-side SL)
+   bool              virtClosed;    // virtual stop fired - brain records ending at candle close
   };
 
 SHand    g_hand[2];
@@ -1640,6 +1645,7 @@ void HandsResetSlot(int s)
    g_hand[s].tries=0;       g_hand[s].replaces=0;
    g_hand[s].orderTicket=0; g_hand[s].posTicket=0;
    g_hand[s].sentSL=0;      g_hand[s].sentTP=0;   g_hand[s].sentLot=0;
+   g_hand[s].virtSL=false;  g_hand[s].virtClosed=false;
   }
 
 bool ModeAllows(int s)
@@ -1756,8 +1762,8 @@ void HandsPlace(int s)
       double realDist = MathAbs(px - sl);                  // risk at the REAL price
       double rl = SuggestLotG(realDist);
       if(rl > 0) useLot = rl;                              // same money risk, smaller lot
-      ok = (dir > 0 ? g_trade.Buy(useLot, _Symbol, 0.0, sl, tp, cmt)
-                    : g_trade.Sell(useLot, _Symbol, 0.0, sl, tp, cmt));
+      ok = (dir > 0 ? g_trade.Buy(useLot, _Symbol, 0.0, (InpSLAtOrder ? sl : 0.0), tp, cmt)
+                    : g_trade.Sell(useLot, _Symbol, 0.0, (InpSLAtOrder ? sl : 0.0), tp, cmt));
       uint rc = g_trade.ResultRetcode();
       ok = (rc == TRADE_RETCODE_DONE || rc == TRADE_RETCODE_PLACED || rc == TRADE_RETCODE_DONE_PARTIAL);
       if(ok)
@@ -1765,23 +1771,24 @@ void HandsPlace(int s)
                     DoubleToString(useLot,2) +
                     (atEntry ? " (price at plan entry - broker min distance)"
                              : " (chase in the 25% band)") +
-                    " - SL/TP attached from birth");
+                    (InpSLAtOrder ? " - SL/TP attached from birth" : " - TP attached, SL VIRTUAL (bot-managed)"));
      }
    else
      {
+      double ordSL = (InpSLAtOrder ? sl : 0.0);      // TP always rides broker-side
       if(dir > 0)
-         ok = (px <= entry ? g_trade.BuyStop(useLot, entry, _Symbol, sl, tp, ORDER_TIME_GTC, 0, cmt)
-                           : g_trade.BuyLimit(useLot, entry, _Symbol, sl, tp, ORDER_TIME_GTC, 0, cmt));
+         ok = (px <= entry ? g_trade.BuyStop(useLot, entry, _Symbol, ordSL, tp, ORDER_TIME_GTC, 0, cmt)
+                           : g_trade.BuyLimit(useLot, entry, _Symbol, ordSL, tp, ORDER_TIME_GTC, 0, cmt));
       else
-         ok = (px >= entry ? g_trade.SellStop(useLot, entry, _Symbol, sl, tp, ORDER_TIME_GTC, 0, cmt)
-                           : g_trade.SellLimit(useLot, entry, _Symbol, sl, tp, ORDER_TIME_GTC, 0, cmt));
+         ok = (px >= entry ? g_trade.SellStop(useLot, entry, _Symbol, ordSL, tp, ORDER_TIME_GTC, 0, cmt)
+                           : g_trade.SellLimit(useLot, entry, _Symbol, ordSL, tp, ORDER_TIME_GTC, 0, cmt));
       uint rc = g_trade.ResultRetcode();
       ok = (rc == TRADE_RETCODE_DONE || rc == TRADE_RETCODE_PLACED);
       if(ok)
          OnDeclared("[" + g_tf[s].tfName + "] order placed: " +
                     (dir>0 ? (px<=entry ? "BUY STOP " : "BUY LIMIT ") : (px>=entry ? "SELL STOP " : "SELL LIMIT ")) +
                     DoubleToString(useLot,2) + " @ " + DoubleToString(entry,_Digits) +
-                    " - SL/TP attached (waiting)");
+                    (InpSLAtOrder ? " - SL/TP attached (waiting)" : " - TP attached, SL VIRTUAL (waiting)"));
      }
 
    if(ok)
@@ -1789,9 +1796,10 @@ void HandsPlace(int s)
       g_hand[s].linked    = true;
       g_hand[s].wasLinked = true;
       g_hand[s].planTime  = g_tf[s].decl.tDeclare;
-      g_hand[s].sentSL    = sl;
+      g_hand[s].sentSL    = (InpSLAtOrder ? sl : 0.0);
       g_hand[s].sentTP    = tp;
       g_hand[s].sentLot   = useLot;
+      g_hand[s].virtSL    = !InpSLAtOrder;
       g_hand[s].tries     = 0;
       if(!chase) g_hand[s].orderTicket = g_trade.ResultOrder();
       SavePlans();
@@ -1831,6 +1839,7 @@ void CheckPending(int s)
       g_hand[s].sentSL      = PositionGetDouble(POSITION_SL);
       g_hand[s].sentTP      = PositionGetDouble(POSITION_TP);
       g_hand[s].sentLot     = PositionGetDouble(POSITION_VOLUME);
+      g_hand[s].virtSL      = (g_hand[s].sentSL <= 0);
       OnDeclared("[" + g_tf[s].tfName + "] entry order FILLED - caretaker took over (SL/TP rode on it from birth)");
       SavePlans();
      }
@@ -1868,6 +1877,13 @@ void HandsBridgePending(int s)
    double wantSL = g_tf[s].decl.sl;
    double wantTP = g_tf[s].decl.tp1;
    if(MathAbs(osl - wantSL) <= tol && MathAbs(otp - wantTP) <= tol) return;
+   double stopsLvl = MathMax((double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL), 10) * _Point;
+   double pxo = (g_tf[s].decl.dir > 0 ? SymbolInfoDouble(_Symbol, SYMBOL_BID)
+                                      : SymbolInfoDouble(_Symbol, SYMBOL_ASK));
+   if(g_tf[s].decl.dir > 0 ? (pxo - wantSL < stopsLvl) : (wantSL - pxo < stopsLvl))
+      wantSL = osl;                         // too close: keep the valid line, retry later
+   if(g_tf[s].decl.dir > 0 ? (wantTP - pxo < stopsLvl) : (pxo - wantTP < stopsLvl))
+      wantTP = otp;
    bool ok = g_trade.OrderModify(g_hand[s].orderTicket,
                                  OrderGetDouble(ORDER_PRICE_OPEN),
                                  wantSL, wantTP, ORDER_TIME_GTC, 0);
@@ -1960,8 +1976,18 @@ void Caretake(int s)
      }
 
    // the bridge: SL ratchet (lock + trail, never backward) + living TP
-   double wantSL = g_tf[s].decl.sl;
+   double wantSL = (g_hand[s].virtSL ? curSL : g_tf[s].decl.sl);  // virtual stop: the bot IS the stop
    double wantTP = g_tf[s].decl.tp1;
+   // broker minimum distance: a line too close to price cannot be set -
+   // keep the current (valid) line for that side; the other side still updates
+   double stopsLvl = MathMax((double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL), 10) * _Point;
+   double pxm = (g_tf[s].decl.dir > 0 ? SymbolInfoDouble(_Symbol, SYMBOL_BID)
+                                      : SymbolInfoDouble(_Symbol, SYMBOL_ASK));
+   if(!g_hand[s].virtSL &&
+      (g_tf[s].decl.dir > 0 ? (pxm - wantSL < stopsLvl) : (wantSL - pxm < stopsLvl)))
+      wantSL = curSL;                       // SL too close to touch: keep the ratchet's last valid line
+   if(g_tf[s].decl.dir > 0 ? (wantTP - pxm < stopsLvl) : (pxm - wantTP < stopsLvl))
+      wantTP = curTP;                       // TP within touching distance: keep the broker line
    if(MathAbs(wantSL - curSL) > tol || MathAbs(wantTP - curTP) > tol)
      {
       bool ok = g_trade.PositionModify(g_hand[s].posTicket, wantSL, wantTP);
@@ -2050,6 +2076,7 @@ void HandsReconcile()
          g_hand[s].sentSL      = PositionGetDouble(POSITION_SL);
          g_hand[s].sentTP      = PositionGetDouble(POSITION_TP);
          g_hand[s].sentLot     = PositionGetDouble(POSITION_VOLUME);
+         g_hand[s].virtSL      = (g_hand[s].sentSL <= 0);
          g_hand[s].partialDone = g_tf[s].decl.beArmed;
          AddEvent("[" + g_tf[s].tfName + "] restored: position re-linked to the saved plan - caretaking resumed");
         }
@@ -2079,7 +2106,7 @@ void SavePlans()
   {
    int f = FileOpen(TRADES_FILE, FILE_WRITE|FILE_BIN);
    if(f == INVALID_HANDLE) return;
-   FileWriteInteger(f, 2);                                  // layout version
+   FileWriteInteger(f, 3);                                  // layout version
    for(int s=0; s<2; s++)
      {
       SDecl d = g_tf[s].decl;
@@ -2102,6 +2129,8 @@ void SavePlans()
       FileWriteInteger(f, g_hand[s].partialDone ? 1 : 0);
       FileWriteInteger(f, g_hand[s].userClosed ? 1 : 0);
       FileWriteInteger(f, g_hand[s].userOverride ? 1 : 0);
+      FileWriteInteger(f, g_hand[s].virtSL ? 1 : 0);
+      FileWriteInteger(f, g_hand[s].virtClosed ? 1 : 0);
       FileWriteDouble(f, g_hand[s].sentSL);
       FileWriteDouble(f, g_hand[s].sentTP);
       FileWriteDouble(f, g_hand[s].sentLot);
@@ -2114,7 +2143,7 @@ void LoadPlans()
    if(!FileIsExist(TRADES_FILE)) return;
    int f = FileOpen(TRADES_FILE, FILE_READ|FILE_BIN);
    if(f == INVALID_HANDLE) return;
-   if(FileReadInteger(f) != 2) { FileClose(f); return; }    // unknown layout: start clean
+   if(FileReadInteger(f) != 3) { FileClose(f); return; }    // unknown layout: start clean
    for(int s=0; s<2; s++)
      {
       SDecl d;
@@ -2144,6 +2173,8 @@ void LoadPlans()
       g_hand[s].partialDone = (FileReadInteger(f) != 0);
       g_hand[s].userClosed  = (FileReadInteger(f) != 0);
       g_hand[s].userOverride    = (FileReadInteger(f) != 0);
+      g_hand[s].virtSL      = (FileReadInteger(f) != 0);
+      g_hand[s].virtClosed  = (FileReadInteger(f) != 0);
       g_hand[s].sentSL      = FileReadDouble(f);
       g_hand[s].sentTP      = FileReadDouble(f);
       g_hand[s].sentLot     = FileReadDouble(f);
@@ -2164,6 +2195,24 @@ void HandsThink()
      {
       if(g_hand[s].orderTicket > 0) CheckPending(s);
       if(g_hand[s].posTicket  > 0) CheckPosition(s);
+
+      // virtual stop (SL not at broker): the bot watches the tick itself
+      if(g_hand[s].virtSL && g_hand[s].posTicket > 0 && g_tf[s].decl.active && !g_hand[s].userOverride)
+        {
+         if(PositionSelectByTicket(g_hand[s].posTicket))
+           {
+            double pxv = (g_tf[s].decl.dir > 0 ? SymbolInfoDouble(_Symbol, SYMBOL_BID)
+                                               : SymbolInfoDouble(_Symbol, SYMBOL_ASK));
+            bool hit = (g_tf[s].decl.dir > 0 ? pxv <= g_tf[s].decl.sl : pxv >= g_tf[s].decl.sl);
+            if(hit && g_trade.PositionClose(g_hand[s].posTicket))
+              {
+               g_hand[s].virtClosed = true;
+               g_hand[s].posTicket  = 0;   // brain records the exact ending at candle close
+               OnDeclared("[" + g_tf[s].tfName + "] virtual stop crossed - position closed at market");
+               SavePlans();
+              }
+           }
+        }
 
       bool active = g_tf[s].decl.active;
       if(!active)
@@ -2200,6 +2249,7 @@ void HandsThink()
             g_hand[s].sentSL   = PositionGetDouble(POSITION_SL);
             g_hand[s].sentTP   = PositionGetDouble(POSITION_TP);
             g_hand[s].sentLot  = PositionGetDouble(POSITION_VOLUME);
+            g_hand[s].virtSL   = (g_hand[s].sentSL <= 0);
            }
         }
       if(g_hand[s].posTicket > 0) Caretake(s);
@@ -2287,7 +2337,8 @@ string DeclLine(const SDecl &d, bool compact)
           "\ntime-left " +
           IntegerToString((d.durBars - d.barsAge > 0 ? d.durBars - d.barsAge : 0)) +
           " of " + IntegerToString(d.durBars) + " bars" +
-          "\nmgmt: partial@+1R, BE, TP follows the candles");
+          "\nmgmt: partial@+1R, lock" + (InpTrailStop ? "+trail" : "") +
+          ", TP follows the candles");
   }
 
 void CleanupDetails()
@@ -2303,9 +2354,9 @@ void CleanupDetails()
 void RenderAll()
   {
    string mr[]; color mc[]; int mn=0;
-   ArrayResize(mr, 48); ArrayResize(mc, 48);
+   ArrayResize(mr, 56); ArrayResize(mc, 56);
 
-   AddRow(mr, mc, mn, "SmartTrader Mi1 - the brain (no orders)", CLR_HEAD);
+   AddRow(mr, mc, mn, "SmartTrader", CLR_HEAD);
 
    bool connOK = (TerminalInfoInteger(TERMINAL_CONNECTED) != 0);
    string symType = g_pr.typeName;
@@ -2344,33 +2395,33 @@ void RenderAll()
       AddRow(mr, mc, mn, ln, lc);
      }
 
-   // declaration (most recent active, else none) - section 5
+   // declaration (BOTH timeframes - none hidden, user rule)
    AddRow(mr, mc, mn, "DECLARATION", CLR_HEAD);
-   int showSlot=-1;
    for(int s=0; s<2; s++)
-      if(g_tf[s].decl.active) { showSlot = s; break; }
-   if(showSlot < 0)
      {
-      // most recent resolved?
-      if(g_memN > 0)
-         AddRow(mr, mc, mn, "no active declaration - last: " +
-                (g_mem[0].dir>0?"BUY ":"SELL ") + g_mem[0].branch + " -> " + g_memNote[0], CLR_DIM);
-      else
-         AddRow(mr, mc, mn, "no active declaration - waiting for a branch execution", CLR_DIM);
-     }
-   else
-     {
-      string dl = DeclLine(g_tf[showSlot].decl, false);
-      bool firstLine = true;
-      int start=0;
-      while(start < StringLen(dl))
+      if(g_tf[s].decl.active)
         {
-         int p = StringFind(dl, "\n", start);
-         string part = (p<0 ? StringSubstr(dl, start) : StringSubstr(dl, start, p-start));
-         AddRow(mr, mc, mn, part, (firstLine ? CLR_ENTRY : CLR_NEUT));
-         firstLine = false;
-         if(p<0) break;
-         start = p+1;
+         string dl = DeclLine(g_tf[s].decl, false);
+         bool firstLine = true;
+         int start=0;
+         while(start < StringLen(dl))
+           {
+            int p = StringFind(dl, "\n", start);
+            string part = (p<0 ? StringSubstr(dl, start) : StringSubstr(dl, start, p-start));
+            AddRow(mr, mc, mn, part, (firstLine ? CLR_ENTRY : CLR_NEUT));
+            firstLine = false;
+            if(p<0) break;
+            start = p+1;
+           }
+        }
+      else
+        {
+         string lastTxt = "";
+         for(int i=0; i<g_memN; i++)
+            if(g_mem[i].tfSlot == s)
+              { lastTxt = (g_mem[i].dir>0?"BUY ":"SELL ") + g_mem[i].branch + " -> " + g_memNote[i]; break; }
+         AddRow(mr, mc, mn, "[" + g_tf[s].tfName + "] no active declaration" +
+                (lastTxt != "" ? " - last: " + lastTxt : " - waiting"), CLR_DIM);
         }
      }
 
@@ -2427,9 +2478,11 @@ void RenderAll()
           double pl  = PositionGetDouble(POSITION_PROFIT);
           AddRow(mr, mc, mn, tf + "  " + (d.dir>0?"BUY ":"SELL ") + DoubleToString(vol,2) +
                  "  entry " + DoubleToString(op,_Digits), (pl>=0 ? CLR_UP : CLR_DN));
-          double msm = MoneyFor(slp - op, vol)*d.dir;
+          double slShow = (slp > 0 ? slp : d.sl);          // virtual stop: show the plan's line
+          double msm = MoneyFor(slShow - op, vol)*d.dir;
           double mtp = MoneyFor(tpp - op, vol)*d.dir;
-          AddRow(mr, mc, mn, "     SL " + DoubleToString(slp,_Digits) + " (" + MSM(msm) + ")  TP " +
+          AddRow(mr, mc, mn, "     SL " + DoubleToString(slShow,_Digits) + " (" + MSM(msm) +
+                 (slp > 0 ? ")" : ") virt") + "  TP " +
                  DoubleToString(tpp,_Digits) + " (" + MSM(mtp) + ")  P/L " + MSM(pl), CLR_NEUT);
          }
        else

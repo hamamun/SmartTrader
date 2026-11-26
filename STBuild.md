@@ -54,6 +54,8 @@ Rule: no step is built until the user approves it here. Each step = few words, n
 - [x] Mi2 Part 2 — FOLLOW-UP open + resting orders (approved)
 - [x] Mi2 Part 3 — CLOSING FACTORS (approved; +1R = OPTION A decided in build session)
 - [x] Mi2 Panel — autotrading section (approved, section below)
+- [x] Mi2 BUILD round 2 — live feedback: header, dual declaration, TrailStop +
+      StoplossAtOrder inputs, modify-distance guard (implemented)
 - [ ] BUILD: Mi2 autotrading (brain untouched, hands added; +1R = OPTION A
       decided: bank half + BE + structure trail, ratchet never backward)
 - [ ] Step 5 — History exam (replay approved rules, honest stats; must also report
@@ -69,12 +71,26 @@ The hands: a TRANSLATOR, never a thinker. It follows the declaration exactly
 The brain (Mi1) is untouched - declarations stay forecasts; the hands also act
 on them when the switch is on.
 
-**Inputs (UI contract amendment: exactly 5 now):**
+**Inputs (UI contract amendment: exactly 7 now):**
 - Risk % per trade (1.0), popup alert (true), ShowDetails (false) - unchanged
 - **Autotrading (default FALSE)** - the master switch; default-off is the
   real-account guard (user decision, replaces any confirm dialog)
 - **Autotrading mode** - BOTH / only-M5 / only-M15 (user tool against
   opposite M5/M15 plans)
+- **TrailStop (default FALSE, user live-feedback round)** - gates ONLY
+  ladder step 3: true = stop trails under every newest rest step (>=0.3R
+  improvement, ratchet never backward); false = stop stays at the lock line
+  until target hit or time-left 0. Steps 1-2 (+1R bank half + lock line)
+  ALWAYS run regardless.
+- **StoplossAtOrder (default TRUE, user live-feedback round)** - true = the
+  SL is attached to the order AT THE BROKER from birth (survives terminal /
+  PC / internet death). false = the order carries NO broker-side SL; the bot
+  holds the stop VIRTUALLY and closes the position itself at market the
+  moment the line is crossed (tick watch; brain records the exact ending at
+  candle close; panel marks the line "virt"). TP ALWAYS rides broker-side
+  either way. Honest trade-off recorded: with false, a dead terminal leaves
+  the position without a broker stop (the property "works even with PC off"
+  holds only for the TP).
 - Status line ALWAYS shows the mode in gold: "AUTOTRADING OFF - forecast
   only" / "AUTOTRADING ON (both TFs)" etc.
 
@@ -195,7 +211,8 @@ retires. The plan is the boss; the position obeys.
   3. TRAIL (structure, under every rest step): each closed candle after +1R,
      find the newest natural pause BEHIND price; if it sits above the current
      stop with >= 0.3R improvement, move the broker-side stop up to it.
-     RATCHET: never moves backward, ever.
+     RATCHET: never moves backward, ever. (GATED by the TrailStop input,
+     default FALSE - see Mi2 Part 1 inputs.)
   4. Tail endings: trailed stop hit (memory "trailed out +XR"), living TP
      hit, or time-left 0. Brain outcome bookkeeping extended accordingly
      (trailed stop above entry = profitable exit, not "stopped at BE").
@@ -396,7 +413,8 @@ Milestone Mi1 = Steps 1-4 (the brain). Panel + inputs are part of Mi1.
   capped so the pair never covers most of the chart; same color language
   (green up / red down / gold attention / gray neutral)
 
-**INPUTS - exactly 3, no others:**
+**INPUTS - exactly 3, no others:** (Mi1 contract; Mi2 amendment grows the
+list to exactly 7 - see Mi2 Part 1)
 - Risk % per trade (default 1.0) - feeds suggested lot size
 - Popup alert (default true) - also everything logged to Experts journal
 - ShowDetails (default false) - secondary panel toggle (right side of main panel)
@@ -501,6 +519,21 @@ Implementation decisions (all within the approved contract):
   at placement (the plan's lot cannot change before the fill, so nothing is
   lost). Order cancellations checked - refusal keeps the hand and retries.
 - **Shutdown persistence:** plans + hand state saved on OnDeinit too.
+- **LIVE-FEEDBACK ROUND 2 (user, 26 Nov - all implemented):**
+  - header row is now just "SmartTrader" (stale "Mi1 - no orders" text retired)
+  - DECLARATION section shows BOTH timeframes, each labeled (the old code
+    rendered only the first active plan - M15 was hidden whenever M5 also
+    held a plan; the auto section had proved both traded); idle TF shows
+    "[TF] no active declaration - last: <its own memory>"
+  - TrailStop + StoplossAtOrder inputs (see Part 1 inputs above)
+  - virtual stop: tick watcher in the hands (bid/ask vs the living stop
+    line), close at market on cross, brain records the ending at candle
+    close, panel shows the line with "virt" tag, persistence layout v3
+  - MODIFY-DISTANCE GUARD (same bug family as the placement rejection): a
+    modified SL/TP closer to price than the broker's stops level cannot be
+    set - the bridge keeps the CURRENT valid line for that side and lets
+    the other side update; protection is never lost (ratchet grace), retry
+    next candle. Applies to the position bridge and the pending bridge.
 - **At-entry proximity (LIVE CASE, UK100m 26 Nov):** a stop/limit order must
   sit at least SYMBOL_TRADE_STOPS_LEVEL from the current price; when price
   HUGS the declared entry (the natural straddle) the resting order at entry
