@@ -107,6 +107,54 @@ on them when the switch is on.
 
 ---
 
+## Mi2 Part 2 — AUTOTRADING: FOLLOW-UP (approved items)
+
+The bridge between brain and real orders: the real position/order always
+mirrors what the living plan says. SL may only move in the SAFE direction
+(BE after +1R, never backward to widen risk); TP may move both ways.
+
+**a. Open (placed) position:**
+1. Magic-number tracking survives restarts: positions/orders live at the
+   broker; only the brain's memory dies. Active plans persist to a small
+   disk file; on startup the bot matches tagged positions to saved plans and
+   resumes caretaking where it left off.
+2. Brain↔order bridge: trend weakens after several bars while price is away
+   from TP → position TP modified to the tightened destination (broker-side
+   line follows the living plan).
+3. Reversible: strength returns → TP extended further, same bridge.
+
+**b. Resting (limit/stop at entry) order:**
+1. Stays alive and follows the brain's status - TP/SL/lot updated to the
+   plan's latest values (if the broker refuses a modification: retry on
+   later candles, log the refusal, the order is never left without its SL).
+2. LIFETIME (user confirmed): the resting order lives exactly as long as its
+   declaration lives. The moment the plan ends (timed out / superseded /
+   closed early / any of the six endings), the order is cancelled the same
+   second - no fills into dead stories.
+
+**Safety rules (user agreed):**
+- One captain per ship: if the USER closes a bot position or moves its
+  SL/TP by hand, the bot logs "manual override", steps aside, and only
+  watches - never reopens, never fights. (Ground rule: user can override.)
+- Netting vs hedging: account type detected at startup. Hedging (user's
+  broker) → normal operation, two TF positions may coexist. Netting → max
+  ONE bot position on the symbol; while one exists, any new order (either
+  direction) is skipped with a logged event - the hands never merge or
+  implicitly close.
+- Broker-rejection discipline: every placement/modification checked;
+  refusals retried, then logged as events - never silent, never half-done.
+- Late-fill handover: a filled resting order becomes a tracked position at
+  the fill instant - full caretaking from birth (SL/TP already on the order).
+
+**Parked to Mi2 Part 3 (closing factors - next discussion):**
+- the six plan endings as real actions (partial close at +1R, BE move,
+  time-stop market close, closed-early market close, supersede close,
+  SL/TP endings noticed + recorded)
+**Parked (separate discussion):**
+- autotrading panel section (mode, per-TF state, real SL/TP, P/L in R)
+
+---
+
 ## Step 2 — THE PRECISION MAP (approved, final)
 
 The trader's pencil work in the bot's own working area (panel table, NOT chart
