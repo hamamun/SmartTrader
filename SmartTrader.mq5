@@ -22,19 +22,28 @@
 //+------------------------------------------------------------------+
 #property copyright   "SmartTrader"
 #property link        "https://github.com/hamamun/SmartTrader"
-#property version     "2.00"
+#property version     "2.10"
 #property description "SmartTrader Mi1 - the brain (Steps 1-4). Forecast only, no orders."
 #property description "Reads M5+M15 on their own nature, draws the precision map, formulates"
 #property description "a living scenario tree, and declares a full plan when the market"
 #property description "proves a branch. Market state and symbol type checked first."
 
+#include <Trade\Trade.mqh>
+
 //====================================================================//
-//  INPUTS - exactly 3 (Mi1 UI contract)                              //
+//  INPUTS (Mi2: exactly 5)                                           //
 //====================================================================//
 
 input double InpRiskPercent = 1.0;   // Risk % per trade (suggested lot sizing)
 input bool   InpAlertPopup  = true;  // Popup alert on declaration
 input bool   InpShowDetails = false; // Show details panel (right of main panel)
+
+enum EAutoMode { AUTO_BOTH = 0,      // both timeframes trade
+                 AUTO_M5_ONLY = 1,   // only M5 trades
+                 AUTO_M15_ONLY = 2   // only M15 trades
+               };
+input bool      InpAutoTrade = false;      // AUTOTRADING master switch
+input EAutoMode InpAutoMode  = AUTO_BOTH;  // AUTOTRADING scope
 
 //====================================================================//
 //  CONSTANTS                                                         //
@@ -108,6 +117,7 @@ input bool   InpShowDetails = false; // Show details panel (right of main panel)
 #define DO_SUPERSEDE 5
 #define DO_CLOSED    6
 #define DO_BE        7
+#define DO_TRAIL     8
 
 // structural constants (market convention, F5-source-a)
 #define FIB_R1       0.382
@@ -117,6 +127,10 @@ input bool   InpShowDetails = false; // Show details panel (right of main panel)
 #define FIB_E2       1.618
 #define CHOP_BOX     61.8
 #define CHOP_TREND   38.2
+
+// Mi2: the hands
+#define MAGIC_BASE   20261126     // bot identity; per-TF = BASE+1 (M5) / +2 (M15)
+#define TRADES_FILE  "SmartTrader_Mi2_plans.bin"
 
 //====================================================================//
 //  SYMBOL TYPE PROFILE (F4 + F5)                                     //
@@ -231,6 +245,27 @@ int ClassifySymbol(string sym)
    return(SYM_OTHER);
   }
 
+// risk-based suggested lot - shared by the brain (forecast) and the hands
+double SuggestLotG(double slDist)
+  {
+   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double tickVal  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   if(tickSize <= 0 || tickVal <= 0 || slDist <= 0) return(0);
+   double lossPerLot = slDist / tickSize * tickVal;
+   if(lossPerLot <= 0) return(0);
+   double riskMoney = AccountInfoDouble(ACCOUNT_BALANCE) * InpRiskPercent / 100.0;
+   double lot = riskMoney / lossPerLot;
+   double lmin = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double lmax = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   double lstep= SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   if(lstep > 0) lot = MathFloor(lot/lstep)*lstep;
+   if(lot < lmin) lot = lmin;
+   if(lot > lmax) lot = lmax;
+   int ld = 0; double s = (lstep > 0 ? lstep : 0.01);
+   while(s < 1.0 && ld < 8) { s *= 10.0; ld++; }
+   return(NormalizeDouble(lot, ld));
+  }
+
 //====================================================================//
 //  MARKET STATE (F3)                                                 //
 //====================================================================//
@@ -341,11 +376,12 @@ struct SDecl
    double            remLots;       // remaining size after partial
    double            bestFav;       // best favorable excursion since entry
    int               tpUpdates;     // how many times the candles moved the target
-   int               durBars;
-   int               timeStop;
+   int               durBars;       // the ONLY clock: estimated bars to the destination
    int               outcome;       // DO_*
    int               barsAge;
    bool              beArmed;
+   double            beLevel;       // +1R lock line: entry +/- 5% of risk (room), else entry
+   double            risk0;         // ORIGINAL risk distance (entry->SL at birth) - trail/lock/R math
   };
 
 //====================================================================//
@@ -434,8 +470,8 @@ public:
       decl.active=false; decl.tfSlot=slot; decl.dir=0; decl.tDeclare=0;
       decl.branch=""; decl.entry=0; decl.sl=0; decl.tp1=0;
       decl.lots=0; decl.remLots=0; decl.bestFav=0; decl.tpUpdates=0;
-      decl.durBars=0; decl.timeStop=0;
-      decl.outcome=DO_ACTIVE; decl.barsAge=0; decl.beArmed=false;
+      decl.durBars=0; decl.risk0=0;
+      decl.outcome=DO_ACTIVE; decl.barsAge=0; decl.beArmed=false; decl.beLevel=0;
      }
 
    double Body(int i)      { return(MathAbs(r[i].close - r[i].open)); }
@@ -1129,28 +1165,50 @@ public:
       if(!decl.active) return;
       decl.barsAge++;
       double a = (atr[1] > 0 ? atr[1] : _Point);
-      double slDist = MathAbs(decl.entry - decl.sl);
+      double slDist = (decl.risk0 > 0 ? decl.risk0 : MathAbs(decl.entry - decl.sl));
 
       // best favorable excursion since entry
       if(decl.dir > 0 && r[1].high > decl.bestFav) decl.bestFav = r[1].high;
       if(decl.dir < 0 && r[1].low  < decl.bestFav) decl.bestFav = r[1].low;
 
       // SL / target outcome (after +1R the plan's stop lives at breakeven)
-      double effSL = (decl.beArmed ? decl.entry : decl.sl);
+      double effSL = decl.sl;    // the stop line: original SL -> lock line at +1R -> trailed
       if(decl.dir > 0)
         {
-         if(r[1].low  <= effSL)   { FinishDecl((decl.beArmed ? DO_BE : DO_SL),
-                                      (decl.beArmed ? "stopped at breakeven - half was banked" : "invalidated")); return; }
+         if(r[1].low <= effSL)
+           {
+            if(decl.beArmed)
+              {
+               double favR = (effSL - decl.entry)/slDist;
+               if(favR > 0.1)
+                 { FinishDecl(DO_TRAIL, "trailed out +" + DoubleToString(favR,1) + "R" +
+                              (decl.remLots < decl.lots ? " - half was banked" : " (min lot - no split)")); return; }
+               FinishDecl(DO_BE, (decl.remLots < decl.lots ? "stopped at BE+ - half was banked"
+                                                           : "stopped at BE+ (min lot - no split)")); return;
+              }
+            FinishDecl(DO_SL, "invalidated"); return;
+           }
          if(r[1].high >= decl.tp1) { FinishDecl(DO_TP1, "target hit");  return; }
         }
       else
         {
-         if(r[1].high >= effSL)   { FinishDecl((decl.beArmed ? DO_BE : DO_SL),
-                                      (decl.beArmed ? "stopped at breakeven - half was banked" : "invalidated")); return; }
+         if(r[1].high >= effSL)
+           {
+            if(decl.beArmed)
+              {
+               double favR = (decl.entry - effSL)/slDist;
+               if(favR > 0.1)
+                 { FinishDecl(DO_TRAIL, "trailed out +" + DoubleToString(favR,1) + "R" +
+                              (decl.remLots < decl.lots ? " - half was banked" : " (min lot - no split)")); return; }
+               FinishDecl(DO_BE, (decl.remLots < decl.lots ? "stopped at BE+ - half was banked"
+                                                           : "stopped at BE+ (min lot - no split)")); return;
+              }
+            FinishDecl(DO_SL, "invalidated"); return;
+           }
          if(r[1].low  <= decl.tp1) { FinishDecl(DO_TP1, "target hit");  return; }
         }
-      if(decl.barsAge >= decl.timeStop)
-        { FinishDecl(DO_TIMEOUT, "timed out (time-stop)"); return; }
+      if(decl.barsAge >= decl.durBars)   // time-left 0: the estimate is spent
+        { FinishDecl(DO_TIMEOUT, "timed out - time-left spent"); return; }
 
       // management: at +1R bank half, stop to breakeven, remainder rides
       double fav = (decl.dir > 0 ? decl.bestFav - decl.entry : decl.entry - decl.bestFav);
@@ -1161,8 +1219,47 @@ public:
          double lmin  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
          double half  = decl.lots/2.0;
          if(lstep > 0) half = MathFloor(half/lstep)*lstep;
-         decl.remLots = (half >= lmin && half > 0 ? half : decl.lots); // too small to split -> keep full
-         AddEvent("[" + tfName + "] +1R reached - half banked, stop to breakeven");
+         bool split = (half >= lmin && half > 0 && half < decl.lots);
+         decl.remLots = (split ? half : decl.lots);   // min lot -> no split, whole trails
+         // lock line: entry + 5% of the RISK distance into profit (covers
+         // spread/costs) when price still leaves room, else plain entry
+         double lock = (decl.dir > 0 ? decl.entry + 0.05*slDist
+                                     : decl.entry - 0.05*slDist);
+         bool room = (decl.dir > 0 ? r[1].close > lock + 0.1*slDist
+                                   : r[1].close < lock - 0.1*slDist);
+         decl.beLevel = (room ? lock : decl.entry);
+         decl.sl = decl.beLevel;               // the stop line IS the lock from now on
+         AddEvent("[" + tfName + "] +1R reached - " +
+                  (split ? "half banked (" + DoubleToString(decl.remLots,2) + " of " +
+                           DoubleToString(decl.lots,2) + "), stop to BE+"
+                         : "min lot, no split - stop to BE+, whole rides"));
+        }
+
+      //--- Option A ladder: trail the stop under the newest rest step
+      //    (structure trail; ratchet - never moves backward, ever)
+      if(decl.beArmed && slDist > 0)
+        {
+         double cand = 0;
+         if(decl.dir > 0)
+           {
+            if(nLo > 0 && swLoP[0] < r[1].close) cand = swLoP[0] - 0.1*slDist;   // pad under the shelf
+           }
+         else
+           {
+            if(nHi > 0 && swHiP[0] > r[1].close) cand = swHiP[0] + 0.1*slDist;
+           }
+         if(cand != 0)
+           {
+            bool safer = (decl.dir > 0 ? cand > decl.sl + 0.3*slDist    // >=0.3R improvement gate
+                                       : cand < decl.sl - 0.3*slDist);
+            if(safer)
+              {
+               double lockR = MathAbs(cand - decl.entry)/slDist;
+               decl.sl = cand;
+               AddEvent("[" + tfName + "] SL trailed to " + DoubleToString(decl.sl,_Digits) +
+                        " (under the newest rest step, +" + DoubleToString(lockR,1) + "R locked)");
+              }
+           }
         }
 
       //--- move health (the human's "is it going as expected?")
@@ -1213,7 +1310,6 @@ public:
             decl.tp1 = newTP; decl.tpUpdates++;
             int run = EstBars(MathAbs(decl.tp1 - decl.entry));
             decl.durBars  = decl.barsAge + run;            // runway follows the living TP
-            decl.timeStop = MathMax(decl.timeStop, decl.barsAge + run);
             OnDeclared("[" + tfName + "] TP tightened to " + DoubleToString(decl.tp1,_Digits) + " (weakening)");
            }
          return;
@@ -1234,7 +1330,6 @@ public:
             decl.tp1 = cand; decl.tpUpdates++;
             int run = EstBars(MathAbs(decl.tp1 - decl.entry));
             decl.durBars  = decl.barsAge + run;            // runway follows the living TP
-            decl.timeStop = MathMax(decl.timeStop, decl.barsAge + run);
             OnDeclared("[" + tfName + "] TP extended to " + DoubleToString(decl.tp1,_Digits) + " (move healthy)");
            }
         }
@@ -1309,6 +1404,7 @@ public:
          decl.active = false;
          PushMemory(decl, "superseded by new selector (" + tfName + " " +
                     TimeToString(TimeCurrent(), TIME_MINUTES) + ")");
+         AddEvent("[" + tfName + "] old plan superseded - a new selector took over");
         }
 
       SZone z = zones[bestZone];
@@ -1388,9 +1484,8 @@ public:
          tp = (d > 0 ? entry + 0.8*slDist : entry - 0.8*slDist);
         }
 
-      // duration + management
+      // duration (the only clock - retires at time-left 0)
       int dur = EstBars(MathAbs(tp - entry));
-      int tstop = MathMax(2*dur, StallBars());
 
       // suggested lot from risk (F5 computation, no user tuning)
       double lot = SuggestLot(slDist);
@@ -1410,13 +1505,13 @@ public:
       decl.branch = bname;
       decl.entry = entry;
       decl.sl = sl;
+      decl.risk0 = slDist;             // original risk: lock/trail/R math never drifts
       decl.tp1 = tp;
       decl.lots = lot;
       decl.remLots = lot;
       decl.bestFav = entry;
       decl.tpUpdates = 0;
       decl.durBars = dur;
-      decl.timeStop = tstop;
       decl.outcome = DO_ACTIVE;
       decl.barsAge = 0;
       decl.beArmed = false;
@@ -1430,29 +1525,10 @@ public:
                  " SL " + DoubleToString(decl.sl,_Digits) +
                  " TP " + DoubleToString(decl.tp1,_Digits) + " (living)" +
                  " lot " + DoubleToString(decl.lots,2) +
-                 " ~" + IntegerToString(decl.durBars) + " bars, time-stop " +
-                 IntegerToString(decl.timeStop));
+                 " ~" + IntegerToString(decl.durBars) + " bars");
      }
 
-   double SuggestLot(double slDist)
-     {
-      double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-      double tickVal  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-      if(tickSize <= 0 || tickVal <= 0 || slDist <= 0) return(0);
-      double lossPerLot = slDist / tickSize * tickVal;
-      if(lossPerLot <= 0) return(0);
-      double riskMoney = AccountInfoDouble(ACCOUNT_BALANCE) * InpRiskPercent / 100.0;
-      double lot = riskMoney / lossPerLot;
-      double lmin = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-      double lmax = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-      double lstep= SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-      if(lstep > 0) lot = MathFloor(lot/lstep)*lstep;
-      if(lot < lmin) lot = lmin;
-      if(lot > lmax) lot = lmax;
-      int ld = 0; double s = (lstep > 0 ? lstep : 0.01);
-      while(s < 1.0 && ld < 8) { s *= 10.0; ld++; }
-      return(NormalizeDouble(lot, ld));
-     }
+   double SuggestLot(double slDist)   { return(SuggestLotG(slDist)); }
 
    //------------------------------------------------------------------
    // per-new-bar pipeline
@@ -1522,7 +1598,603 @@ string OutcomeText(int o)
    if(o==DO_SUPERSEDE) return("superseded");
    if(o==DO_CLOSED)    return("closed early");
    if(o==DO_BE)        return("stopped at BE");
+   if(o==DO_TRAIL)     return("trailed out");
    return("active");
+  }
+
+//====================================================================//
+//  Mi2: THE HANDS - autotrading translator (never a thinker)         //
+//====================================================================//
+
+struct SHand
+  {
+   datetime          planTime;      // tDeclare of the plan this hand is linked to
+   datetime          lastBarC;      // caretaker cadence (one action pass per candle)
+   datetime          birthBar;      // market-chase allowed only in the plan's birth bar
+   bool              linked;        // a real order/position exists for this plan
+   bool              wasLinked;     // a placement was made for this plan
+   bool              partialDone;   // +1R bank-half executed for real
+   bool              userClosed;    // position closed externally - bot stands down
+   bool              override;      // user changed SL/TP - one captain per ship
+   bool              suspended;     // broker refused repeatedly - placement paused
+   int               tries;         // consecutive broker refusals
+   int               replaces;      // re-placements after external vanish
+   ulong             orderTicket;   // resting order ticket (0 = none)
+   ulong             posTicket;     // position ticket (0 = none)
+   double            sentSL;        // last SL sent to the broker
+   double            sentTP;        // last TP sent to the broker
+   double            sentLot;       // lot of the placed order/position
+  };
+
+SHand    g_hand[2];
+CTrade   g_trade;
+bool     g_hedging = true;
+string   g_accCur  = "";
+
+void HandsResetSlot(int s)
+  {
+   g_hand[s].planTime=0;    g_hand[s].lastBarC=0;  g_hand[s].birthBar=0;
+   g_hand[s].linked=false;  g_hand[s].wasLinked=false;
+   g_hand[s].partialDone=false; g_hand[s].userClosed=false;
+   g_hand[s].override=false;    g_hand[s].suspended=false;
+   g_hand[s].tries=0;       g_hand[s].replaces=0;
+   g_hand[s].orderTicket=0; g_hand[s].posTicket=0;
+   g_hand[s].sentSL=0;      g_hand[s].sentTP=0;   g_hand[s].sentLot=0;
+  }
+
+bool ModeAllows(int s)
+  {
+   if(InpAutoMode == AUTO_M5_ONLY)  return(s == 0);
+   if(InpAutoMode == AUTO_M15_ONLY) return(s == 1);
+   return(true);
+  }
+
+long SlotMagic(int s)      { return(MAGIC_BASE + 1 + s); }
+
+bool TradeAllowed()
+  {
+   return(TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) != 0 &&
+          MQLInfoInteger(MQL_TRADE_ALLOWED) != 0);
+  }
+
+bool AnyBotPosition()
+  {
+   for(int i=PositionsTotal()-1; i>=0; i--)
+     {
+      ulong tk = PositionGetTicket(i);
+      if(tk == 0) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+      long m = PositionGetInteger(POSITION_MAGIC);
+      if(m == SlotMagic(0) || m == SlotMagic(1)) return(true);
+     }
+   return(false);
+  }
+
+ulong FindBotPosition(int s)
+  {
+   for(int i=PositionsTotal()-1; i>=0; i--)
+     {
+      ulong tk = PositionGetTicket(i);
+      if(tk == 0) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != SlotMagic(s)) continue;
+      return(tk);                          // position stays selected for the caller
+     }
+   return(0);
+  }
+
+ulong FindBotOrder(int s)
+  {
+   for(int i=OrdersTotal()-1; i>=0; i--)
+     {
+      ulong tk = OrderGetTicket(i);
+      if(tk == 0) continue;
+      if(OrderGetString(ORDER_SYMBOL) != _Symbol) continue;
+      if(OrderGetInteger(ORDER_MAGIC) != SlotMagic(s)) continue;
+      return(tk);                          // order stays selected
+     }
+   return(0);
+  }
+
+string MSM(double m)   { return((m >= 0 ? "+" : "") + DoubleToString(m, 2)); }
+
+double MoneyFor(double dist, double lot)   // signed price distance -> account money
+  {
+   double ts = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double tv = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   if(ts <= 0 || tv <= 0) return(0);
+   return(dist / ts * tv * lot);
+  }
+
+//--------------------------------------------------------------------
+// Part 1: place the plan's order (entry following, protected from birth)
+//--------------------------------------------------------------------
+void HandsPlace(int s)
+  {
+   if(!g_tf[s].decl.active || g_tf[s].decl.dir == 0) return;
+   if(g_hand[s].wasLinked || g_hand[s].linked) return;      // one placement per plan
+
+   if(!TradeAllowed()) return;                              // panel shows BLOCKED
+   if(!g_hedging && AnyBotPosition())
+     {
+      g_hand[s].tries++;
+      if(g_hand[s].tries == 1)
+         AddEvent("[" + g_tf[s].tfName + "] netting account - one bot position at a time: order skipped");
+      return;
+     }
+
+   double entry = g_tf[s].decl.entry;
+   double sl    = g_tf[s].decl.sl;
+   double tp    = g_tf[s].decl.tp1;
+   double slDist= (g_tf[s].decl.risk0 > 0 ? g_tf[s].decl.risk0 : MathAbs(entry - sl));
+   int    dir   = g_tf[s].decl.dir;
+   double lot   = g_tf[s].decl.lots;
+
+   if(g_hand[s].birthBar == 0)
+      g_hand[s].birthBar = iTime(_Symbol, g_tf[s].tf, 0);   // chase window opens
+
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double px  = (dir > 0 ? ask : bid);
+   bool crossed = (dir > 0 ? px > entry : px < entry);
+   bool birthOK = (iTime(_Symbol, g_tf[s].tf, 0) == g_hand[s].birthBar);
+   bool chase = crossed && birthOK && (MathAbs(px - entry) <= 0.25*slDist);
+
+   g_trade.SetExpertMagicNumber(SlotMagic(s));
+   string cmt = "ST-" + (s==0 ? "M5" : "M15");
+   bool ok = false;
+   double useLot = lot;
+
+   if(chase)
+     {
+      double realDist = MathAbs(px - sl);                  // risk at the REAL price
+      double rl = SuggestLotG(realDist);
+      if(rl > 0) useLot = rl;                              // same money risk, smaller lot
+      ok = (dir > 0 ? g_trade.Buy(useLot, _Symbol, 0.0, sl, tp, cmt)
+                    : g_trade.Sell(useLot, _Symbol, 0.0, sl, tp, cmt));
+      uint rc = g_trade.ResultRetcode();
+      ok = (rc == TRADE_RETCODE_DONE || rc == TRADE_RETCODE_PLACED || rc == TRADE_RETCODE_DONE_PARTIAL);
+      if(ok)
+         OnDeclared("[" + g_tf[s].tfName + "] order placed: MARKET " + (dir>0?"BUY ":"SELL ") +
+                    DoubleToString(useLot,2) + " (chase in the 25% band) - SL/TP attached from birth");
+     }
+   else
+     {
+      if(dir > 0)
+         ok = (px <= entry ? g_trade.BuyStop(useLot, entry, _Symbol, sl, tp, ORDER_TIME_GTC, 0, cmt)
+                           : g_trade.BuyLimit(useLot, entry, _Symbol, sl, tp, ORDER_TIME_GTC, 0, cmt));
+      else
+         ok = (px >= entry ? g_trade.SellStop(useLot, entry, _Symbol, sl, tp, ORDER_TIME_GTC, 0, cmt)
+                           : g_trade.SellLimit(useLot, entry, _Symbol, sl, tp, ORDER_TIME_GTC, 0, cmt));
+      uint rc = g_trade.ResultRetcode();
+      ok = (rc == TRADE_RETCODE_DONE || rc == TRADE_RETCODE_PLACED);
+      if(ok)
+         OnDeclared("[" + g_tf[s].tfName + "] order placed: " +
+                    (dir>0 ? (px<=entry ? "BUY STOP " : "BUY LIMIT ") : (px>=entry ? "SELL STOP " : "SELL LIMIT ")) +
+                    DoubleToString(useLot,2) + " @ " + DoubleToString(entry,_Digits) +
+                    " - SL/TP attached (waiting)");
+     }
+
+   if(ok)
+     {
+      g_hand[s].linked    = true;
+      g_hand[s].wasLinked = true;
+      g_hand[s].planTime  = g_tf[s].decl.tDeclare;
+      g_hand[s].sentSL    = sl;
+      g_hand[s].sentTP    = tp;
+      g_hand[s].sentLot   = useLot;
+      g_hand[s].tries     = 0;
+      if(!chase) g_hand[s].orderTicket = g_trade.ResultOrder();
+      SavePlans();
+     }
+   else
+     {
+      g_hand[s].tries++;
+      if(g_hand[s].tries == 1 || g_hand[s].tries % 5 == 0)
+         AddEvent("[" + g_tf[s].tfName + "] broker refused placement (" +
+                  g_trade.ResultRetcodeDescription() + ") - retrying");
+      if(g_hand[s].tries >= 20)
+        {
+         g_hand[s].suspended = true;
+         OnDeclared("[" + g_tf[s].tfName + "] placement suspended - broker refused repeatedly");
+        }
+     }
+  }
+
+//--------------------------------------------------------------------
+// resting order gone: filled (late handover) or vanished (external cancel)
+//--------------------------------------------------------------------
+void CheckPending(int s)
+  {
+   bool stillThere = false;
+   for(int i=OrdersTotal()-1; i>=0; i--)
+     {
+      ulong t = OrderGetTicket(i);
+      if(t == g_hand[s].orderTicket) { stillThere = true; break; }
+     }
+   if(stillThere) return;
+
+   ulong pt = FindBotPosition(s);
+   if(pt > 0)                                               // LATE FILL - edge 2
+     {
+      g_hand[s].posTicket   = pt;
+      g_hand[s].orderTicket = 0;
+      g_hand[s].sentSL      = PositionGetDouble(POSITION_SL);
+      g_hand[s].sentTP      = PositionGetDouble(POSITION_TP);
+      g_hand[s].sentLot     = PositionGetDouble(POSITION_VOLUME);
+      OnDeclared("[" + g_tf[s].tfName + "] entry order FILLED - caretaker took over (SL/TP rode on it from birth)");
+      SavePlans();
+     }
+   else
+     {
+      g_hand[s].orderTicket = 0;
+      g_hand[s].linked      = false;
+      if(g_tf[s].decl.active && g_hand[s].replaces < 2)
+        {
+         g_hand[s].replaces++;
+         g_hand[s].wasLinked = false;                       // allow re-placement
+         AddEvent("[" + g_tf[s].tfName + "] resting order vanished (external cancel?) - re-placing");
+        }
+      else
+        {
+         g_hand[s].userClosed = true;
+         if(g_tf[s].decl.active)
+            OnDeclared("[" + g_tf[s].tfName + "] resting order gone without fill - bot stands aside");
+        }
+      SavePlans();
+     }
+  }
+
+//--------------------------------------------------------------------
+// the bridge for a RESTING order: SL/TP follow the living plan
+// (Part 2 b.1). The lot is fixed at placement (the plan's lot cannot
+// change before the fill), so only the two lines are mirrored.
+//--------------------------------------------------------------------
+void HandsBridgePending(int s)
+  {
+   if(!OrderSelectByTicket(g_hand[s].orderTicket)) return;
+   double tol  = 5*_Point;
+   double osl  = OrderGetDouble(ORDER_SL);
+   double otp  = OrderGetDouble(ORDER_TP);
+   double wantSL = g_tf[s].decl.sl;
+   double wantTP = g_tf[s].decl.tp1;
+   if(MathAbs(osl - wantSL) <= tol && MathAbs(otp - wantTP) <= tol) return;
+   bool ok = g_trade.OrderModify(g_hand[s].orderTicket,
+                                 OrderGetDouble(ORDER_PRICE_OPEN),
+                                 wantSL, wantTP, ORDER_TIME_GTC, 0);
+   if(ok)
+     {
+      g_hand[s].sentSL = wantSL;
+      g_hand[s].sentTP = wantTP;
+      g_hand[s].tries  = 0;
+      SavePlans();
+     }
+   else
+     {
+      g_hand[s].tries++;
+      if(g_hand[s].tries % 5 == 1)
+         AddEvent("[" + g_tf[s].tfName + "] order modify refused (" +
+                  g_trade.ResultRetcodeDescription() + ") - retrying next candle");
+     }
+  }
+
+//--------------------------------------------------------------------
+// position gone: broker line fired, or the user closed it (one captain)
+//--------------------------------------------------------------------
+void CheckPosition(int s)
+  {
+   if(PositionSelectByTicket(g_hand[s].posTicket)) return;
+   ulong pt = FindBotPosition(s);
+   if(pt > 0) { g_hand[s].posTicket = pt; return; }         // ticket morph (netting)
+   g_hand[s].posTicket = 0;
+   g_hand[s].linked    = false;
+   if(g_tf[s].decl.active)
+     {
+      g_hand[s].userClosed = true;                          // brain still records the ending
+      OnDeclared("[" + g_tf[s].tfName + "] bot position closed externally (SL/TP line or by user) - bot stands down");
+      SavePlans();
+     }
+  }
+
+//--------------------------------------------------------------------
+// the caretaker: candle-cadenced bridge (partial, lock, trail, living TP)
+//--------------------------------------------------------------------
+void Caretake(int s)
+  {
+   datetime cb = iTime(_Symbol, g_tf[s].tf, 0);
+   if(cb == g_hand[s].lastBarC) return;                     // one pass per candle
+   g_hand[s].lastBarC = cb;
+
+   if(!PositionSelectByTicket(g_hand[s].posTicket)) return;
+   double curSL  = PositionGetDouble(POSITION_SL);
+   double curTP  = PositionGetDouble(POSITION_TP);
+   double tol    = 5*_Point;
+
+   // one captain per ship: user touched the lines -> bot watches only
+   if(!g_hand[s].override && g_hand[s].sentSL > 0 &&
+      (MathAbs(curSL - g_hand[s].sentSL) > tol || MathAbs(curTP - g_hand[s].sentTP) > tol))
+     {
+      g_hand[s].override = true;
+      OnDeclared("[" + g_tf[s].tfName + "] manual override - SL/TP changed by user, bot steps aside (watches only)");
+      SavePlans();
+      return;
+     }
+   if(g_hand[s].override) return;
+
+   // Option A step 2: +1R -> bank half for real (min lot: nothing to bank)
+   // volumes from the REAL position (a chase fill may hold a smaller lot)
+   SDecl d = g_tf[s].decl;
+   if(d.beArmed && !g_hand[s].partialDone)
+     {
+      double vol     = PositionGetDouble(POSITION_VOLUME);
+      double lstep   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+      double lmin    = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+      double bankVol = (lstep > 0 ? MathFloor(vol/2.0/lstep)*lstep : vol/2.0);
+      if(bankVol >= lmin && bankVol > 0 && bankVol < vol)
+        {
+         bool ok = g_trade.PositionClosePartial(g_hand[s].posTicket, bankVol);
+         uint rc = g_trade.ResultRetcode();
+         if(ok || rc == TRADE_RETCODE_DONE || rc == TRADE_RETCODE_DONE_PARTIAL)
+           {
+            g_hand[s].partialDone = true;
+            g_hand[s].sentLot     = vol - bankVol;
+            OnDeclared("[" + g_tf[s].tfName + "] +1R banked for real: " + DoubleToString(bankVol,2) +
+                       " lot closed, stop at the lock line");
+            SavePlans();
+           }
+         else
+            AddEvent("[" + g_tf[s].tfName + "] partial close refused (" +
+                     g_trade.ResultRetcodeDescription() + ") - will retry next candle");
+         return;                                           // bridge continues next candle
+        }
+      g_hand[s].partialDone = true;                        // min lot: nothing to split - whole rides
+     }
+
+   // the bridge: SL ratchet (lock + trail, never backward) + living TP
+   double wantSL = g_tf[s].decl.sl;
+   double wantTP = g_tf[s].decl.tp1;
+   if(MathAbs(wantSL - curSL) > tol || MathAbs(wantTP - curTP) > tol)
+     {
+      bool ok = g_trade.PositionModify(g_hand[s].posTicket, wantSL, wantTP);
+      if(ok)
+        {
+         g_hand[s].sentSL = wantSL;
+         g_hand[s].sentTP = wantTP;
+         g_hand[s].tries   = 0;
+         SavePlans();
+        }
+      else
+        {
+         g_hand[s].tries++;
+         if(g_hand[s].tries % 5 == 1)
+            AddEvent("[" + g_tf[s].tfName + "] modify refused (" +
+                     g_trade.ResultRetcodeDescription() + ") - retrying next candle");
+        }
+     }
+  }
+
+//--------------------------------------------------------------------
+// Part 3: the plan retired -> the real order obeys (same reason, same second)
+//--------------------------------------------------------------------
+void HandsOnPlanEnd(int s, string reason)
+  {
+   bool done = true;
+   if(g_hand[s].orderTicket > 0)
+     {
+      if(OrderSelectByTicket(g_hand[s].orderTicket))
+        {
+         if(g_trade.OrderDelete(g_hand[s].orderTicket))
+            OnDeclared("[" + g_tf[s].tfName + "] resting order cancelled - plan " + reason);
+         else
+           {
+            AddEvent("[" + g_tf[s].tfName + "] order cancel refused (" +
+                     g_trade.ResultRetcodeDescription() + ") - will retry");
+            done = false;                                  // keep the hand, retry next tick
+           }
+        }
+      else
+         OnDeclared("[" + g_tf[s].tfName + "] resting order already gone - plan " + reason);
+     }
+   if(done && g_hand[s].posTicket > 0 && !g_hand[s].override && !g_hand[s].userClosed)
+     {
+      if(PositionSelectByTicket(g_hand[s].posTicket))
+        {
+         if(g_trade.PositionClose(g_hand[s].posTicket))
+            OnDeclared("[" + g_tf[s].tfName + "] position closed at market - plan " + reason);
+         else
+           {
+            AddEvent("[" + g_tf[s].tfName + "] close refused (" +
+                     g_trade.ResultRetcodeDescription() + ") - will retry");
+            return;                                        // keep the hand for the retry
+           }
+        }
+      else
+         OnDeclared("[" + g_tf[s].tfName + "] position already gone - plan " + reason);
+     }
+   if(done)
+     {
+      HandsResetSlot(s);
+      SavePlans();
+     }
+  }
+
+//--------------------------------------------------------------------
+// restart recovery: broker holds the truth, the file holds the plans
+//--------------------------------------------------------------------
+void HandsReconcile()
+  {
+   for(int s=0; s<2; s++)
+     {
+      if(!g_tf[s].decl.active)
+        {
+         if(!g_hand[s].linked) HandsResetSlot(s);
+         continue;
+        }
+      ulong pt = FindBotPosition(s);
+      ulong ot = FindBotOrder(s);
+      if(pt > 0)
+        {
+         g_hand[s].posTicket   = pt;
+         g_hand[s].linked      = true;
+         g_hand[s].wasLinked   = true;
+         g_hand[s].planTime    = g_tf[s].decl.tDeclare;
+         g_hand[s].sentSL      = PositionGetDouble(POSITION_SL);
+         g_hand[s].sentTP      = PositionGetDouble(POSITION_TP);
+         g_hand[s].sentLot     = PositionGetDouble(POSITION_VOLUME);
+         g_hand[s].partialDone = g_tf[s].decl.beArmed;
+         AddEvent("[" + g_tf[s].tfName + "] restored: position re-linked to the saved plan - caretaking resumed");
+        }
+      else if(ot > 0)
+        {
+         g_hand[s].orderTicket = ot;
+         g_hand[s].linked      = true;
+         g_hand[s].wasLinked   = true;
+         g_hand[s].planTime    = g_tf[s].decl.tDeclare;
+         g_hand[s].sentSL      = OrderGetDouble(ORDER_SL);
+         g_hand[s].sentTP      = OrderGetDouble(ORDER_TP);
+         g_hand[s].sentLot     = OrderGetDouble(ORDER_VOLUME_CURRENT);
+         AddEvent("[" + g_tf[s].tfName + "] restored: resting order re-linked to the saved plan");
+        }
+      else if(g_hand[s].wasLinked)
+        {
+         g_hand[s].userClosed = true;
+         AddEvent("[" + g_tf[s].tfName + "] saved plan's order/position not found at restart - bot stands aside");
+        }
+     }
+  }
+
+//--------------------------------------------------------------------
+// plan persistence (small binary file, terminal Files folder)
+//--------------------------------------------------------------------
+void SavePlans()
+  {
+   int f = FileOpen(TRADES_FILE, FILE_WRITE|FILE_BIN);
+   if(f == INVALID_HANDLE) return;
+   FileWriteInteger(f, 2);                                  // layout version
+   for(int s=0; s<2; s++)
+     {
+      SDecl d = g_tf[s].decl;
+      FileWriteInteger(f, d.active ? 1 : 0);
+      FileWriteInteger(f, d.tfSlot);
+      FileWriteInteger(f, d.dir);
+      FileWriteLong(f, (long)d.tDeclare);
+      FileWriteDouble(f, d.entry);   FileWriteDouble(f, d.sl);    FileWriteDouble(f, d.tp1);
+      FileWriteDouble(f, d.lots);    FileWriteDouble(f, d.remLots); FileWriteDouble(f, d.bestFav);
+      FileWriteDouble(f, d.beLevel); FileWriteDouble(f, d.risk0);
+      FileWriteInteger(f, d.tpUpdates);
+      FileWriteInteger(f, d.durBars);
+      FileWriteInteger(f, d.barsAge);
+      FileWriteInteger(f, d.beArmed ? 1 : 0);
+      FileWriteInteger(f, d.outcome);
+      FileWriteLong(f, (long)g_hand[s].orderTicket);
+      FileWriteLong(f, (long)g_hand[s].posTicket);
+      FileWriteInteger(f, g_hand[s].linked ? 1 : 0);
+      FileWriteInteger(f, g_hand[s].wasLinked ? 1 : 0);
+      FileWriteInteger(f, g_hand[s].partialDone ? 1 : 0);
+      FileWriteInteger(f, g_hand[s].userClosed ? 1 : 0);
+      FileWriteInteger(f, g_hand[s].override ? 1 : 0);
+      FileWriteDouble(f, g_hand[s].sentSL);
+      FileWriteDouble(f, g_hand[s].sentTP);
+      FileWriteDouble(f, g_hand[s].sentLot);
+     }
+   FileClose(f);
+  }
+
+void LoadPlans()
+  {
+   if(!FileIsExist(TRADES_FILE)) return;
+   int f = FileOpen(TRADES_FILE, FILE_READ|FILE_BIN);
+   if(f == INVALID_HANDLE) return;
+   if(FileReadInteger(f) != 2) { FileClose(f); return; }    // unknown layout: start clean
+   for(int s=0; s<2; s++)
+     {
+      SDecl d;
+      d.active    = (FileReadInteger(f) != 0);
+      d.tfSlot    = FileReadInteger(f);
+      d.dir       = FileReadInteger(f);
+      d.tDeclare  = (datetime)FileReadLong(f);
+      d.entry     = FileReadDouble(f);
+      d.sl        = FileReadDouble(f);
+      d.tp1       = FileReadDouble(f);
+      d.lots      = FileReadDouble(f);
+      d.remLots   = FileReadDouble(f);
+      d.bestFav   = FileReadDouble(f);
+      d.beLevel   = FileReadDouble(f);
+      d.risk0     = FileReadDouble(f);
+      d.tpUpdates = FileReadInteger(f);
+      d.durBars   = FileReadInteger(f);
+      d.barsAge   = FileReadInteger(f);
+      d.beArmed   = (FileReadInteger(f) != 0);
+      d.outcome   = FileReadInteger(f);
+      d.branch    = "(restored)";
+      g_tf[s].decl = d;
+      g_hand[s].orderTicket = (ulong)FileReadLong(f);
+      g_hand[s].posTicket   = (ulong)FileReadLong(f);
+      g_hand[s].linked      = (FileReadInteger(f) != 0);
+      g_hand[s].wasLinked   = (FileReadInteger(f) != 0);
+      g_hand[s].partialDone = (FileReadInteger(f) != 0);
+      g_hand[s].userClosed  = (FileReadInteger(f) != 0);
+      g_hand[s].override    = (FileReadInteger(f) != 0);
+      g_hand[s].sentSL      = FileReadDouble(f);
+      g_hand[s].sentTP      = FileReadDouble(f);
+      g_hand[s].sentLot     = FileReadDouble(f);
+      if(d.active)
+         AddEvent("[" + g_tf[s].tfName + "] plan restored from disk" +
+                  (d.beArmed ? " (+1R armed)" : ""));
+     }
+   FileClose(f);
+  }
+
+//--------------------------------------------------------------------
+// the hands' master pass (every tick; actions on transitions only)
+//--------------------------------------------------------------------
+void HandsThink()
+  {
+   if(!g_tfOK) return;
+   for(int s=0; s<2; s++)
+     {
+      if(g_hand[s].orderTicket > 0) CheckPending(s);
+      if(g_hand[s].posTicket  > 0) CheckPosition(s);
+
+      bool active = g_tf[s].decl.active;
+      if(!active)
+        {
+         if(g_hand[s].linked || g_hand[s].orderTicket > 0 || g_hand[s].posTicket > 0)
+            HandsOnPlanEnd(s, OutcomeText(g_tf[s].decl.outcome));
+         else if(g_hand[s].planTime != 0)
+            HandsResetSlot(s);
+         continue;
+        }
+      // a NEW plan inherited an old hand (supersede path): retire the old order first
+      if(g_hand[s].planTime != g_tf[s].decl.tDeclare &&
+         (g_hand[s].linked || g_hand[s].wasLinked))
+        {
+         HandsOnPlanEnd(s, "superseded");
+         continue;                                          // new plan placed next tick, clean hand
+        }
+      // the master switch gates NEW placements only - an already-linked
+      // order/position keeps obeying its plan (the LAW: same ending, same second)
+      if(!g_hand[s].linked)
+        {
+         if(InpAutoTrade && ModeAllows(s) && g_msState == MS_OPEN &&
+            !g_hand[s].userClosed && !g_hand[s].suspended && !g_hand[s].wasLinked)
+            HandsPlace(s);
+         continue;
+        }
+      if(g_hand[s].orderTicket > 0) HandsBridgePending(s);  // resting order follows the plan
+      if(g_hand[s].posTicket == 0 && g_hand[s].orderTicket == 0)
+        {
+         ulong pt = FindBotPosition(s);                     // market fill linkage
+         if(pt > 0)
+           {
+            g_hand[s].posTicket = pt;
+            g_hand[s].sentSL   = PositionGetDouble(POSITION_SL);
+            g_hand[s].sentTP   = PositionGetDouble(POSITION_TP);
+            g_hand[s].sentLot  = PositionGetDouble(POSITION_VOLUME);
+           }
+        }
+      if(g_hand[s].posTicket > 0) Caretake(s);
+     }
   }
 
 //====================================================================//
@@ -1601,11 +2273,11 @@ string DeclLine(const SDecl &d, bool compact)
           "   SL " + DoubleToString(d.sl,_Digits) +
           "\nTP " + DoubleToString(d.tp1,_Digits) +
           (d.tpUpdates > 0 ? "  (updated " + IntegerToString(d.tpUpdates) + "x by candles)" : "") +
-          "\nlot " + DoubleToString(d.remLots,2) + " of " + DoubleToString(d.lots,2) +
+          "\nlot " + DoubleToString(d.remLots,2) +
+          (d.remLots < d.lots ? " of " + DoubleToString(d.lots,2) : "") +
           "\ntime-left " +
           IntegerToString((d.durBars - d.barsAge > 0 ? d.durBars - d.barsAge : 0)) +
           " of " + IntegerToString(d.durBars) + " bars" +
-          "   time-stop " + IntegerToString(d.timeStop) + " bars" +
           "\nmgmt: partial@+1R, BE, TP follows the candles");
   }
 
@@ -1622,7 +2294,7 @@ void CleanupDetails()
 void RenderAll()
   {
    string mr[]; color mc[]; int mn=0;
-   ArrayResize(mr, 40); ArrayResize(mc, 40);
+   ArrayResize(mr, 48); ArrayResize(mc, 48);
 
    AddRow(mr, mc, mn, "SmartTrader Mi1 - the brain (no orders)", CLR_HEAD);
 
@@ -1707,6 +2379,57 @@ void RenderAll()
 
    // event line (section 6)
    AddRow(mr, mc, mn, "event: " + (g_eventN>0 ? g_events[0] : "none yet"), CLR_ATT);
+
+   //--- autotrading section (Mi2 panel contract: below the event line)
+   {
+    string modeTxt = (InpAutoMode==AUTO_BOTH ? "both" :
+                      (InpAutoMode==AUTO_M5_ONLY ? "M5 only" : "M15 only"));
+    string hdr = (!InpAutoTrade ? "AUTOTRADING OFF - forecast only"
+                 : "AUTOTRADING ON (" + modeTxt + ") [" + (g_hedging ? "hedging" : "netting") + "] " +
+                   g_accCur + (TradeAllowed() ? "" : "  BLOCKED - enable Algo Trading"));
+    AddRow(mr, mc, mn, hdr, CLR_ATT);
+    for(int s=0; s<2; s++)
+      {
+       SDecl d = g_tf[s].decl;
+       string tf = g_tf[s].tfName;
+       if(!d.active || (!g_hand[s].linked && !g_hand[s].wasLinked))
+         {
+          AddRow(mr, mc, mn, tf + "  -- entry --   lot --", CLR_DIM);
+          AddRow(mr, mc, mn, "     sl --   tp --   p/l --", CLR_DIM);
+          continue;
+         }
+       bool havePos = (g_hand[s].posTicket > 0 && PositionSelectByTicket(g_hand[s].posTicket));
+       bool pend    = (g_hand[s].orderTicket > 0);
+       if(pend && !havePos)
+         {
+          double msm = MoneyFor(d.sl    - d.entry, d.remLots)*d.dir;
+          double mtp = MoneyFor(d.tp1   - d.entry, d.remLots)*d.dir;
+          AddRow(mr, mc, mn, tf + "  LIMIT " + (d.dir>0?"BUY ":"SELL ") +
+                 DoubleToString(d.remLots,2) + " @ " + DoubleToString(d.entry,_Digits) + " (waiting)", CLR_ATT);
+          AddRow(mr, mc, mn, "     SL " + DoubleToString(d.sl,_Digits) + " (" + MSM(msm) + ")  TP " +
+                 DoubleToString(d.tp1,_Digits) + " (" + MSM(mtp) + ")  P/L --", CLR_NEUT);
+         }
+       else if(havePos)
+         {
+          double vol = PositionGetDouble(POSITION_VOLUME);
+          double op  = PositionGetDouble(POSITION_PRICE_OPEN);
+          double slp = PositionGetDouble(POSITION_SL);
+          double tpp = PositionGetDouble(POSITION_TP);
+          double pl  = PositionGetDouble(POSITION_PROFIT);
+          AddRow(mr, mc, mn, tf + "  " + (d.dir>0?"BUY ":"SELL ") + DoubleToString(vol,2) +
+                 "  entry " + DoubleToString(op,_Digits), (pl>=0 ? CLR_UP : CLR_DN));
+          double msm = MoneyFor(slp - op, vol)*d.dir;
+          double mtp = MoneyFor(tpp - op, vol)*d.dir;
+          AddRow(mr, mc, mn, "     SL " + DoubleToString(slp,_Digits) + " (" + MSM(msm) + ")  TP " +
+                 DoubleToString(tpp,_Digits) + " (" + MSM(mtp) + ")  P/L " + MSM(pl), CLR_NEUT);
+         }
+       else
+         {
+          AddRow(mr, mc, mn, tf + "  (bot stood aside - order/position closed externally)", CLR_DIM);
+          AddRow(mr, mc, mn, "     sl --   tp --   p/l --", CLR_DIM);
+         }
+      }
+   }
 
    PaintPanel(OBJ_P+"M_", 8, 8, MAIN_W, mr, mc, mn);
 
@@ -1828,6 +2551,14 @@ int OnInit()
    //--- F3: market state first
    UpdateMarketState();
 
+   //--- Mi2: the hands (account facts, trade engine, restore + reconcile)
+   g_hedging = (AccountInfoInteger(ACCOUNT_MARGIN_MODE) == ACCOUNT_MARGIN_MODE_RETAIL_HEDGING);
+   g_accCur  = AccountInfoString(ACCOUNT_CURRENCY);
+   g_trade.SetTypeFillingBySymbol(_Symbol);
+   g_trade.SetDeviationInPoints(20);
+   LoadPlans();
+   HandsReconcile();
+
    EventSetTimer(1);
    Print("SmartTrader Mi1 started on ", _Symbol, " [", g_pr.typeName, "] chart ",
          EnumToString(_Period), " - brain only: trend, map, verdict, declarations. No orders.");
@@ -1837,6 +2568,7 @@ int OnInit()
 
 void OnDeinit(const int reason)
   {
+   SavePlans();                              // persist before unload (restart recovery)
    EventKillTimer();
    ObjectsDeleteAll(0, OBJ_P);
    ChartRedraw(0);
@@ -1854,6 +2586,7 @@ void OnTick()
       g_tf[0].ManageAndDetect(g_tf[1].tDir, g_tf[1].tRegime);
       g_tf[1].ManageAndDetect(g_tf[0].tDir, g_tf[0].tRegime);
      }
+   HandsThink();                            // Mi2: the hands (internally gated)
    RenderAll();
   }
 
