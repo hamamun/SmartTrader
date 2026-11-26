@@ -52,7 +52,7 @@ Rule: no step is built until the user approves it here. Each step = few words, n
 - [x] BUILD: Mi1 v2.00 implemented (SmartTrader.mq5) - pending user verification in MT5
 - [x] Mi2 Part 1 — Autotrading ORDER PLACEMENT (approved)
 - [x] Mi2 Part 2 — FOLLOW-UP open + resting orders (approved)
-- [x] Mi2 Part 3 — CLOSING FACTORS (approved; +1R tail stop parked to build session)
+- [x] Mi2 Part 3 — CLOSING FACTORS (approved; +1R = OPTION A decided in build session)
 - [x] Mi2 Panel — autotrading section (approved, section below)
 - [ ] BUILD: Mi2 autotrading (brain untouched, hands added; +1R = OPTION A
       decided: bank half + BE + structure trail, ratchet never backward)
@@ -202,9 +202,7 @@ retires. The plan is the boss; the position obeys.
 - Resting order endings: unfilled → cancelled when its plan dies (Part 2);
   filled late → becomes a tracked position at the fill instant (Part 2).
 
-**Still parked (separate discussion):**
-- autotrading panel section (mode, per-TF state, real SL/TP as placed,
-  P/L in R-multiples)
+**(resolved: the autotrading panel section is approved - see Mi2 Panel below)**
 
 ---
 
@@ -452,3 +450,44 @@ The bot reads trend like human eyes, then confirms with tools:
   (e.g. "UP, strong, young" / "UP, weakening, old — pullbacks deepening").
 - Momentum oscillators (RSI/MACD/Stochastic…) are NOT trend tools — they may
   appear later only in signal validation, reduced list.
+
+---
+
+## Mi2 BUILD — IMPLEMENTED (spec-first build complete)
+
+Implementation decisions (all within the approved contract):
+
+- **Inputs 5:** Risk% (1.0), popup (true), ShowDetails (false), Autotrading
+  (FALSE), Autotrading scope (enum BOTH / M5 only / M15 only).
+- **Identity:** MAGIC_BASE 20261126; M5 = BASE+1, M15 = BASE+2. Positions and
+  orders found by magic + symbol - manual trades invisible.
+- **Engine:** standard CTrade; filling mode auto per symbol; deviation 20 pts.
+- **Placement (Part 1):** resting order AT entry (named BUY/SELL STOP when
+  price is on the entry's far side, LIMIT when price is beyond entry); chase =
+  MARKET only within the birth bar and <= 25% of the risk-distance gap, lot
+  recomputed at the real price (same money risk); SL/TP ride on the order from
+  birth. Refusals: retry (journal every 5th), suspend after 20.
+- **Caretaker (Part 2):** candle cadence. +1R partial close computed from the
+  REAL position volume (chase fills may hold smaller lots); min lot -> no
+  split, whole rides. Bridge sends SL + living TP in ONE modify; SL = decl.sl
+  which becomes the LOCK LINE at arming and then only ratchets (trail).
+- **Trail (Option A, brain side):** newest rest step behind price with 0.1R
+  pad, gate >= 0.3R improvement, ratchet never backward. New outcome DO_TRAIL
+  "trailed out +X.XR" when the trailed stop is hit (profitable exit); DO_BE
+  stays for lock-line hits.
+- **Closings (Part 3):** plan not active + hand linked -> close at market /
+  delete resting, reason = the plan's OutcomeText; supersede handover retires
+  the old hand first, the new plan is placed on the next tick.
+- **One captain:** position SL/TP differing from what the bot last sent
+  (5-pt tolerance) -> "manual override", bot watches only. Position/order
+  vanished externally -> "bot stands down" (brain still records the ending).
+- **Persistence/recovery:** SmartTrader_Mi2_plans.bin (version 2) stores plan +
+  hand state; on init LoadPlans + HandsReconcile re-link by magic; a saved
+  plan whose order/position is missing -> stand aside; a never-placed plan
+  (autotrading was off) may place once the switch is on. First-ever placement
+  attempt sets that plan's chase window (birth-bar rule).
+- **Netting:** any bot position on the symbol blocks new orders (logged).
+- **Panel:** gold header (mode + hedging/netting + account currency +
+  "BLOCKED - enable Algo Trading" flag); per TF two rows: entry/lot and
+  SL(price + money) TP(price + money) P/L realtime via tick value, waiting
+  limit shows P/L "--", "--" placeholders when OFF/idle.
