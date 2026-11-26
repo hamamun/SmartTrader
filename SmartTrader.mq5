@@ -1852,7 +1852,7 @@ void CheckPending(int s)
 //--------------------------------------------------------------------
 void HandsBridgePending(int s)
   {
-   if(!OrderSelectByTicket(g_hand[s].orderTicket)) return;
+   if(!OrderSelect(g_hand[s].orderTicket)) return;
    double tol  = 5*_Point;
    double osl  = OrderGetDouble(ORDER_SL);
    double otp  = OrderGetDouble(ORDER_TP);
@@ -1981,7 +1981,7 @@ void HandsOnPlanEnd(int s, string reason)
    bool done = true;
    if(g_hand[s].orderTicket > 0)
      {
-      if(OrderSelectByTicket(g_hand[s].orderTicket))
+      if(OrderSelect(g_hand[s].orderTicket))
         {
          if(g_trade.OrderDelete(g_hand[s].orderTicket))
             OnDeclared("[" + g_tf[s].tfName + "] resting order cancelled - plan " + reason);
