@@ -136,11 +136,14 @@ mirrors what the living plan says. SL may only move in the SAFE direction
 - One captain per ship: if the USER closes a bot position or moves its
   SL/TP by hand, the bot logs "manual override", steps aside, and only
   watches - never reopens, never fights. (Ground rule: user can override.)
-- Netting vs hedging: account type detected at startup. Hedging (user's
-  broker) → normal operation, two TF positions may coexist. Netting → max
-  ONE bot position on the symbol; while one exists, any new order (either
-  direction) is skipped with a logged event - the hands never merge or
-  implicitly close.
+- Netting vs hedging (USER DECISION): the hands never merge volumes and never
+  implicitly close - one trade per timeframe per symbol; M5 and M15 both
+  allowed simultaneously when the mode input allows them. On hedging accounts
+  (user's broker) this is physical: side-by-side positions, each with its own
+  plan/SL/TP/tag. On netting accounts the BROKER merges by symbol regardless
+  of software - there the user's "no merge" rule is enforced by skipping any
+  new bot order while a bot position exists on the symbol (logged event),
+  because on such accounts sending an order IS a merge.
 - Broker-rejection discipline: every placement/modification checked;
   refusals retried, then logged as events - never silent, never half-done.
 - Late-fill handover: a filled resting order becomes a tracked position at
