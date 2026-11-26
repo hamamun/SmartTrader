@@ -50,9 +50,60 @@ Rule: no step is built until the user approves it here. Each step = few words, n
 - [x] Step 4 — Branch execution: detect, re-validate, declare (approved)
 - [x] Mi1 UI contract (approved)
 - [x] BUILD: Mi1 v2.00 implemented (SmartTrader.mq5) - pending user verification in MT5
-- [ ] Step 5 — History exam (replay approved rules, honest stats)
+- [x] Mi2 Part 1 — Autotrading ORDER PLACEMENT (approved, section below)
+- [ ] Mi2 Part 2 — Order follow-up / close / exit, open + limit orders (design next)
+- [ ] BUILD: Mi2 autotrading (after Part 2 approved; brain untouched, hands added)
+- [ ] Step 5 — History exam (replay approved rules, honest stats; must also report
+      how autotrading functioned) — done AFTER autotrading per user re-ordering
 - [ ] Step 6 — Demo forward test (scoreboard)
-- [ ] Step 7 — Autotrading (Phase 2: risk lots, order management, overridable rails)
+
+---
+
+## Mi2 Part 1 — AUTOTRADING: ORDER PLACEMENT (approved)
+
+The hands: a TRANSLATOR, never a thinker. It follows the declaration exactly
+(latest living values at order time); zero new calculations, no new decisions.
+The brain (Mi1) is untouched - declarations stay forecasts; the hands also act
+on them when the switch is on.
+
+**Inputs (UI contract amendment: exactly 5 now):**
+- Risk % per trade (1.0), popup alert (true), ShowDetails (false) - unchanged
+- **Autotrading (default FALSE)** - the master switch; default-off is the
+  real-account guard (user decision, replaces any confirm dialog)
+- **Autotrading mode** - BOTH / only-M5 / only-M15 (user tool against
+  opposite M5/M15 plans)
+- Status line ALWAYS shows the mode in gold: "AUTOTRADING OFF - forecast
+  only" / "AUTOTRADING ON (both TFs)" etc.
+
+**Placement rules:**
+1. Orders only while market state OPEN (F3) and only on the TFs the mode allows.
+2. Identity: every bot order/position carries a magic-number tag. Manual user
+   positions are invisible to the bot - never counted, touched, or closed.
+3. Entry following (user's rule, BUY example, plan entry = 5):
+   - price still at/better than entry (bid/ask straddles 5) → resting order AT
+     the entry price (named limit or stop per side, whichever the broker
+     demands; fills naturally at the planned price)
+   - fast market crossed past the entry within the plan's BIRTH BAR and the
+     gap entry→current ask/bid is <= 25% of the entry→stop distance →
+     MARKET order at current price ("don't lose the bar's trade")
+   - crossed past beyond 25% → resting order at entry anyway (never deep chase)
+   - chase window = birth bar only
+4. Protection from birth: every order carries its SL + TP attached from the
+   first millisecond (broker-side lines survive disconnect/terminal death).
+5. Lot: the 1%-risk formula at the REAL fill price - a chase fill takes a
+   smaller lot, money risk stays exactly the budget.
+6. Limits: one position per timeframe, max two total; margin/volume pre-flight
+   checks; any failure = no order, event logged, forecast stays forecast.
+7. Resting-order lifetime + all cancellation = Part 2 (exit design), pending.
+
+**Parked to Mi2 Part 2 (design discussion next, before build):**
+- when a resting order is cancelled (order dies with its declaration)
+- follow-up/exit of OPEN positions: partial at +1R, BE stop, living TP
+  modifications, time-stop, closed-early, supersede handover
+- late-fill handover to the caretaker (edge 2)
+- netting vs hedging account detection
+- terminal-restart recovery (plan persisted to disk, reconcile tagged positions)
+- user-interference handling (position closed/changed by hand → step away)
 
 ---
 
