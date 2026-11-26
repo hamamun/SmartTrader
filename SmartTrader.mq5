@@ -1615,7 +1615,7 @@ struct SHand
    bool              wasLinked;     // a placement was made for this plan
    bool              partialDone;   // +1R bank-half executed for real
    bool              userClosed;    // position closed externally - bot stands down
-   bool              override;      // user changed SL/TP - one captain per ship
+   bool              userOverride;      // user changed SL/TP - one captain per ship
    bool              suspended;     // broker refused repeatedly - placement paused
    int               tries;         // consecutive broker refusals
    int               replaces;      // re-placements after external vanish
@@ -1636,7 +1636,7 @@ void HandsResetSlot(int s)
    g_hand[s].planTime=0;    g_hand[s].lastBarC=0;  g_hand[s].birthBar=0;
    g_hand[s].linked=false;  g_hand[s].wasLinked=false;
    g_hand[s].partialDone=false; g_hand[s].userClosed=false;
-   g_hand[s].override=false;    g_hand[s].suspended=false;
+   g_hand[s].userOverride=false;    g_hand[s].suspended=false;
    g_hand[s].tries=0;       g_hand[s].replaces=0;
    g_hand[s].orderTicket=0; g_hand[s].posTicket=0;
    g_hand[s].sentSL=0;      g_hand[s].sentTP=0;   g_hand[s].sentLot=0;
@@ -1911,15 +1911,15 @@ void Caretake(int s)
    double tol    = 5*_Point;
 
    // one captain per ship: user touched the lines -> bot watches only
-   if(!g_hand[s].override && g_hand[s].sentSL > 0 &&
+   if(!g_hand[s].userOverride && g_hand[s].sentSL > 0 &&
       (MathAbs(curSL - g_hand[s].sentSL) > tol || MathAbs(curTP - g_hand[s].sentTP) > tol))
      {
-      g_hand[s].override = true;
+      g_hand[s].userOverride = true;
       OnDeclared("[" + g_tf[s].tfName + "] manual override - SL/TP changed by user, bot steps aside (watches only)");
       SavePlans();
       return;
      }
-   if(g_hand[s].override) return;
+   if(g_hand[s].userOverride) return;
 
    // Option A step 2: +1R -> bank half for real (min lot: nothing to bank)
    // volumes from the REAL position (a chase fill may hold a smaller lot)
@@ -1995,7 +1995,7 @@ void HandsOnPlanEnd(int s, string reason)
       else
          OnDeclared("[" + g_tf[s].tfName + "] resting order already gone - plan " + reason);
      }
-   if(done && g_hand[s].posTicket > 0 && !g_hand[s].override && !g_hand[s].userClosed)
+   if(done && g_hand[s].posTicket > 0 && !g_hand[s].userOverride && !g_hand[s].userClosed)
      {
       if(PositionSelectByTicket(g_hand[s].posTicket))
         {
@@ -2092,7 +2092,7 @@ void SavePlans()
       FileWriteInteger(f, g_hand[s].wasLinked ? 1 : 0);
       FileWriteInteger(f, g_hand[s].partialDone ? 1 : 0);
       FileWriteInteger(f, g_hand[s].userClosed ? 1 : 0);
-      FileWriteInteger(f, g_hand[s].override ? 1 : 0);
+      FileWriteInteger(f, g_hand[s].userOverride ? 1 : 0);
       FileWriteDouble(f, g_hand[s].sentSL);
       FileWriteDouble(f, g_hand[s].sentTP);
       FileWriteDouble(f, g_hand[s].sentLot);
@@ -2134,7 +2134,7 @@ void LoadPlans()
       g_hand[s].wasLinked   = (FileReadInteger(f) != 0);
       g_hand[s].partialDone = (FileReadInteger(f) != 0);
       g_hand[s].userClosed  = (FileReadInteger(f) != 0);
-      g_hand[s].override    = (FileReadInteger(f) != 0);
+      g_hand[s].userOverride    = (FileReadInteger(f) != 0);
       g_hand[s].sentSL      = FileReadDouble(f);
       g_hand[s].sentTP      = FileReadDouble(f);
       g_hand[s].sentLot     = FileReadDouble(f);
