@@ -54,8 +54,8 @@ Rule: no step is built until the user approves it here. Each step = few words, n
 - [x] Mi2 Part 2 — FOLLOW-UP open + resting orders (approved)
 - [x] Mi2 Part 3 — CLOSING FACTORS (approved; +1R tail stop parked to build session)
 - [x] Mi2 Panel — autotrading section (approved, section below)
-- [ ] BUILD: Mi2 autotrading (brain untouched, hands added; +1R decision answered
-      in the build session, as the user parked it there)
+- [ ] BUILD: Mi2 autotrading (brain untouched, hands added; +1R = OPTION A
+      decided: bank half + BE + structure trail, ratchet never backward)
 - [ ] Step 5 — History exam (replay approved rules, honest stats; must also report
       how autotrading functioned) — done AFTER autotrading per user re-ordering
 - [ ] Step 6 — Demo forward test (scoreboard)
@@ -180,10 +180,20 @@ retires. The plan is the boss; the position obeys.
 - **target hit / invalidated** → the broker's own SL/TP lines did it (they
   rode on the order from birth); the bot notices the position is gone and
   records the ending honestly. These two work even with the PC off.
-- **+1R reached (tail stop) - PARKED BY USER:** the real-action choice (bank
-  half vs protect-only, no partials) is deferred to the autotrading BUILD
-  session and marked there. Brain-level forecast bookkeeping unchanged until
-  that decision.
+- **+1R reached (tail stop) - USER DECIDED in build session: OPTION A.**
+  The researched professional ladder (structure trail - best in backtests;
+  fits the bot's natural-pause shelves):
+  1. Do NOTHING until +1R (early BE moves get shaken out by noise).
+  2. At +1R: close HALF the position for real (cash secured), move the
+     stop to breakeven - the trade can no longer lose money. Positions too
+     small to split (e.g. 0.01): protect whole, trail whole.
+  3. TRAIL (structure, under every rest step): each closed candle after +1R,
+     find the newest natural pause BEHIND price; if it sits above the current
+     stop with >= 0.3R improvement, move the broker-side stop up to it.
+     RATCHET: never moves backward, ever.
+  4. Tail endings: trailed stop hit (memory "trailed out +XR"), living TP
+     hit, or time-left 0. Brain outcome bookkeeping extended accordingly
+     (trailed stop above entry = profitable exit, not "stopped at BE").
 - Resting order endings: unfilled → cancelled when its plan dies (Part 2);
   filled late → becomes a tracked position at the fill instant (Part 2).
 
