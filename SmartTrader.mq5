@@ -22,7 +22,7 @@
 //+------------------------------------------------------------------+
 #property copyright   "SmartTrader"
 #property link        "https://github.com/hamamun/SmartTrader"
-#property version     "2.00"
+#property version     "2.10"
 #property description "SmartTrader Mi1 - the brain (Steps 1-4). Forecast only, no orders."
 #property description "Reads M5+M15 on their own nature, draws the precision map, formulates"
 #property description "a living scenario tree, and declares a full plan when the market"
@@ -1846,6 +1846,39 @@ void CheckPending(int s)
   }
 
 //--------------------------------------------------------------------
+// the bridge for a RESTING order: SL/TP follow the living plan
+// (Part 2 b.1). The lot is fixed at placement (the plan's lot cannot
+// change before the fill), so only the two lines are mirrored.
+//--------------------------------------------------------------------
+void HandsBridgePending(int s)
+  {
+   if(!OrderSelectByTicket(g_hand[s].orderTicket)) return;
+   double tol  = 5*_Point;
+   double osl  = OrderGetDouble(ORDER_SL);
+   double otp  = OrderGetDouble(ORDER_TP);
+   double wantSL = g_tf[s].decl.sl;
+   double wantTP = g_tf[s].decl.tp1;
+   if(MathAbs(osl - wantSL) <= tol && MathAbs(otp - wantTP) <= tol) return;
+   bool ok = g_trade.OrderModify(g_hand[s].orderTicket,
+                                 OrderGetDouble(ORDER_PRICE_OPEN),
+                                 wantSL, wantTP, ORDER_TIME_GTC, 0);
+   if(ok)
+     {
+      g_hand[s].sentSL = wantSL;
+      g_hand[s].sentTP = wantTP;
+      g_hand[s].tries  = 0;
+      SavePlans();
+     }
+   else
+     {
+      g_hand[s].tries++;
+      if(g_hand[s].tries % 5 == 1)
+         AddEvent("[" + g_tf[s].tfName + "] order modify refused (" +
+                  g_trade.ResultRetcodeDescription() + ") - retrying next candle");
+     }
+  }
+
+//--------------------------------------------------------------------
 // position gone: broker line fired, or the user closed it (one captain)
 //--------------------------------------------------------------------
 void CheckPosition(int s)
@@ -1945,17 +1978,28 @@ void Caretake(int s)
 //--------------------------------------------------------------------
 void HandsOnPlanEnd(int s, string reason)
   {
+   bool done = true;
    if(g_hand[s].orderTicket > 0)
      {
-      g_trade.OrderDelete(g_hand[s].orderTicket);
-      OnDeclared("[" + g_tf[s].tfName + "] resting order cancelled - plan " + reason);
+      if(OrderSelectByTicket(g_hand[s].orderTicket))
+        {
+         if(g_trade.OrderDelete(g_hand[s].orderTicket))
+            OnDeclared("[" + g_tf[s].tfName + "] resting order cancelled - plan " + reason);
+         else
+           {
+            AddEvent("[" + g_tf[s].tfName + "] order cancel refused (" +
+                     g_trade.ResultRetcodeDescription() + ") - will retry");
+            done = false;                                  // keep the hand, retry next tick
+           }
+        }
+      else
+         OnDeclared("[" + g_tf[s].tfName + "] resting order already gone - plan " + reason);
      }
-   if(g_hand[s].posTicket > 0 && !g_hand[s].override && !g_hand[s].userClosed)
+   if(done && g_hand[s].posTicket > 0 && !g_hand[s].override && !g_hand[s].userClosed)
      {
       if(PositionSelectByTicket(g_hand[s].posTicket))
         {
-         bool ok = g_trade.PositionClose(g_hand[s].posTicket);
-         if(ok)
+         if(g_trade.PositionClose(g_hand[s].posTicket))
             OnDeclared("[" + g_tf[s].tfName + "] position closed at market - plan " + reason);
          else
            {
@@ -1964,9 +2008,14 @@ void HandsOnPlanEnd(int s, string reason)
             return;                                        // keep the hand for the retry
            }
         }
+      else
+         OnDeclared("[" + g_tf[s].tfName + "] position already gone - plan " + reason);
      }
-   HandsResetSlot(s);
-   SavePlans();
+   if(done)
+     {
+      HandsResetSlot(s);
+      SavePlans();
+     }
   }
 
 //--------------------------------------------------------------------
@@ -2123,14 +2172,16 @@ void HandsThink()
          HandsOnPlanEnd(s, "superseded");
          continue;                                          // new plan placed next tick, clean hand
         }
-      if(!InpAutoTrade || !ModeAllows(s)) continue;
-      if(g_msState != MS_OPEN) continue;
+      // the master switch gates NEW placements only - an already-linked
+      // order/position keeps obeying its plan (the LAW: same ending, same second)
       if(!g_hand[s].linked)
         {
-         if(!g_hand[s].userClosed && !g_hand[s].suspended && !g_hand[s].wasLinked)
+         if(InpAutoTrade && ModeAllows(s) && g_msState == MS_OPEN &&
+            !g_hand[s].userClosed && !g_hand[s].suspended && !g_hand[s].wasLinked)
             HandsPlace(s);
          continue;
         }
+      if(g_hand[s].orderTicket > 0) HandsBridgePending(s);  // resting order follows the plan
       if(g_hand[s].posTicket == 0 && g_hand[s].orderTicket == 0)
         {
          ulong pt = FindBotPosition(s);                     // market fill linkage
@@ -2341,7 +2392,7 @@ void RenderAll()
       {
        SDecl d = g_tf[s].decl;
        string tf = g_tf[s].tfName;
-       if(!InpAutoTrade || !d.active || (!g_hand[s].linked && !g_hand[s].wasLinked))
+       if(!d.active || (!g_hand[s].linked && !g_hand[s].wasLinked))
          {
           AddRow(mr, mc, mn, tf + "  -- entry --   lot --", CLR_DIM);
           AddRow(mr, mc, mn, "     sl --   tp --   p/l --", CLR_DIM);
@@ -2517,6 +2568,7 @@ int OnInit()
 
 void OnDeinit(const int reason)
   {
+   SavePlans();                              // persist before unload (restart recovery)
    EventKillTimer();
    ObjectsDeleteAll(0, OBJ_P);
    ChartRedraw(0);

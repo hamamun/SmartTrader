@@ -490,4 +490,14 @@ Implementation decisions (all within the approved contract):
 - **Panel:** gold header (mode + hedging/netting + account currency +
   "BLOCKED - enable Algo Trading" flag); per TF two rows: entry/lot and
   SL(price + money) TP(price + money) P/L realtime via tick value, waiting
-  limit shows P/L "--", "--" placeholders when OFF/idle.
+  limit shows P/L "--", "--" placeholders when idle. Rows show the REAL
+  state even with the switch OFF (silence never hides a position).
+- **Master-switch semantics (self-review):** the switch gates NEW placements
+  only; an already-linked order/position keeps obeying its plan - caretaker,
+  bridges and closings run even with the switch OFF (the LAW: same ending,
+  same second). Turning the switch OFF never orphans a position.
+- **Resting-order bridge (self-review):** SL/TP of a pending order are
+  mirrored via OrderModify (Part 2 b.1); the lot of a resting order is fixed
+  at placement (the plan's lot cannot change before the fill, so nothing is
+  lost). Order cancellations checked - refusal keeps the hand and retries.
+- **Shutdown persistence:** plans + hand state saved on OnDeinit too.
