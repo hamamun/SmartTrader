@@ -341,8 +341,7 @@ struct SDecl
    double            remLots;       // remaining size after partial
    double            bestFav;       // best favorable excursion since entry
    int               tpUpdates;     // how many times the candles moved the target
-   int               durBars;
-   int               timeStop;
+   int               durBars;       // the ONLY clock: estimated bars to the destination
    int               outcome;       // DO_*
    int               barsAge;
    bool              beArmed;
@@ -434,7 +433,7 @@ public:
       decl.active=false; decl.tfSlot=slot; decl.dir=0; decl.tDeclare=0;
       decl.branch=""; decl.entry=0; decl.sl=0; decl.tp1=0;
       decl.lots=0; decl.remLots=0; decl.bestFav=0; decl.tpUpdates=0;
-      decl.durBars=0; decl.timeStop=0;
+      decl.durBars=0;
       decl.outcome=DO_ACTIVE; decl.barsAge=0; decl.beArmed=false;
      }
 
@@ -1149,8 +1148,8 @@ public:
                                       (decl.beArmed ? "stopped at breakeven - half was banked" : "invalidated")); return; }
          if(r[1].low  <= decl.tp1) { FinishDecl(DO_TP1, "target hit");  return; }
         }
-      if(decl.barsAge >= decl.timeStop)
-        { FinishDecl(DO_TIMEOUT, "timed out (time-stop)"); return; }
+      if(decl.barsAge >= decl.durBars)   // time-left 0: the estimate is spent
+        { FinishDecl(DO_TIMEOUT, "timed out - time-left spent"); return; }
 
       // management: at +1R bank half, stop to breakeven, remainder rides
       double fav = (decl.dir > 0 ? decl.bestFav - decl.entry : decl.entry - decl.bestFav);
@@ -1213,7 +1212,6 @@ public:
             decl.tp1 = newTP; decl.tpUpdates++;
             int run = EstBars(MathAbs(decl.tp1 - decl.entry));
             decl.durBars  = decl.barsAge + run;            // runway follows the living TP
-            decl.timeStop = MathMax(decl.timeStop, decl.barsAge + run);
             OnDeclared("[" + tfName + "] TP tightened to " + DoubleToString(decl.tp1,_Digits) + " (weakening)");
            }
          return;
@@ -1234,7 +1232,6 @@ public:
             decl.tp1 = cand; decl.tpUpdates++;
             int run = EstBars(MathAbs(decl.tp1 - decl.entry));
             decl.durBars  = decl.barsAge + run;            // runway follows the living TP
-            decl.timeStop = MathMax(decl.timeStop, decl.barsAge + run);
             OnDeclared("[" + tfName + "] TP extended to " + DoubleToString(decl.tp1,_Digits) + " (move healthy)");
            }
         }
@@ -1389,9 +1386,8 @@ public:
          tp = (d > 0 ? entry + 0.8*slDist : entry - 0.8*slDist);
         }
 
-      // duration + management
+      // duration (the only clock - retires at time-left 0)
       int dur = EstBars(MathAbs(tp - entry));
-      int tstop = MathMax(2*dur, StallBars());
 
       // suggested lot from risk (F5 computation, no user tuning)
       double lot = SuggestLot(slDist);
@@ -1417,7 +1413,6 @@ public:
       decl.bestFav = entry;
       decl.tpUpdates = 0;
       decl.durBars = dur;
-      decl.timeStop = tstop;
       decl.outcome = DO_ACTIVE;
       decl.barsAge = 0;
       decl.beArmed = false;
@@ -1431,8 +1426,7 @@ public:
                  " SL " + DoubleToString(decl.sl,_Digits) +
                  " TP " + DoubleToString(decl.tp1,_Digits) + " (living)" +
                  " lot " + DoubleToString(decl.lots,2) +
-                 " ~" + IntegerToString(decl.durBars) + " bars, time-stop " +
-                 IntegerToString(decl.timeStop));
+                 " ~" + IntegerToString(decl.durBars) + " bars");
      }
 
    double SuggestLot(double slDist)
@@ -1606,7 +1600,6 @@ string DeclLine(const SDecl &d, bool compact)
           "\ntime-left " +
           IntegerToString((d.durBars - d.barsAge > 0 ? d.durBars - d.barsAge : 0)) +
           " of " + IntegerToString(d.durBars) + " bars" +
-          "   time-stop " + IntegerToString(d.timeStop) + " bars" +
           "\nmgmt: partial@+1R, BE, TP follows the candles");
   }
 

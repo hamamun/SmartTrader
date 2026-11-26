@@ -158,6 +158,38 @@ mirrors what the living plan says. SL may only move in the SAFE direction
 
 ---
 
+## Mi2 Part 3 — AUTOTRADING: CLOSING FACTORS (approved)
+
+LAW: the real position ends at the same second, for the same reason the plan
+retires. The plan is the boss; the position obeys.
+
+- **The clock (USER AMENDMENT, applied to the brain):** the plan retires when
+  its OWN estimate completes - "3 bars when complete, retire, position
+  closed." The doubled time-stop is REMOVED from the panel and from the plan
+  (struct field deleted); "time-left N of M bars" is the only clock. A living
+  TP extension/tighten refills the runway (durBars = barsAge + run), so an
+  extended plan legitimately gets fresh time. At time-left 0: plan retired
+  ("timed out - time-left spent") and, once hands exist, the real position
+  closes at market. Resting-order lifetime follows the same clock.
+- **closed early - move failed** → close the entire position at market.
+- **superseded** → close the old position entirely, THEN place the new plan's
+  order per Part 1 rules - never flip, never merge.
+- **target hit / invalidated** → the broker's own SL/TP lines did it (they
+  rode on the order from birth); the bot notices the position is gone and
+  records the ending honestly. These two work even with the PC off.
+- **+1R reached (tail stop) - PARKED BY USER:** the real-action choice (bank
+  half vs protect-only, no partials) is deferred to the autotrading BUILD
+  session and marked there. Brain-level forecast bookkeeping unchanged until
+  that decision.
+- Resting order endings: unfilled → cancelled when its plan dies (Part 2);
+  filled late → becomes a tracked position at the fill instant (Part 2).
+
+**Still parked (separate discussion):**
+- autotrading panel section (mode, per-TF state, real SL/TP as placed,
+  P/L in R-multiples)
+
+---
+
 ## Step 2 — THE PRECISION MAP (approved, final)
 
 The trader's pencil work in the bot's own working area (panel table, NOT chart
