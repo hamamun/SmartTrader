@@ -1738,7 +1738,13 @@ void HandsPlace(int s)
    double px  = (dir > 0 ? ask : bid);
    bool crossed = (dir > 0 ? px > entry : px < entry);
    bool birthOK = (iTime(_Symbol, g_tf[s].tf, 0) == g_hand[s].birthBar);
-   bool chase = crossed && birthOK && (MathAbs(px - entry) <= 0.25*slDist);
+   bool inBand  = (MathAbs(px - entry) <= 0.25*slDist);
+   // broker minimum distance for stop/limit orders: when price HUGS the
+   // declared entry (the natural straddle), a resting order AT the entry is
+   // invalid - and an instant market fill IS the plan price (UK100 live case)
+   double minDist = MathMax((double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL), 10) * _Point;
+   bool atEntry = (MathAbs(px - entry) < minDist);
+   bool chase = (crossed && birthOK && inBand) || atEntry;
 
    g_trade.SetExpertMagicNumber(SlotMagic(s));
    string cmt = "ST-" + (s==0 ? "M5" : "M15");
@@ -1756,7 +1762,10 @@ void HandsPlace(int s)
       ok = (rc == TRADE_RETCODE_DONE || rc == TRADE_RETCODE_PLACED || rc == TRADE_RETCODE_DONE_PARTIAL);
       if(ok)
          OnDeclared("[" + g_tf[s].tfName + "] order placed: MARKET " + (dir>0?"BUY ":"SELL ") +
-                    DoubleToString(useLot,2) + " (chase in the 25% band) - SL/TP attached from birth");
+                    DoubleToString(useLot,2) +
+                    (atEntry ? " (price at plan entry - broker min distance)"
+                             : " (chase in the 25% band)") +
+                    " - SL/TP attached from birth");
      }
    else
      {

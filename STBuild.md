@@ -501,3 +501,12 @@ Implementation decisions (all within the approved contract):
   at placement (the plan's lot cannot change before the fill, so nothing is
   lost). Order cancellations checked - refusal keeps the hand and retries.
 - **Shutdown persistence:** plans + hand state saved on OnDeinit too.
+- **At-entry proximity (LIVE CASE, UK100m 26 Nov):** a stop/limit order must
+  sit at least SYMBOL_TRADE_STOPS_LEVEL from the current price; when price
+  HUGS the declared entry (the natural straddle) the resting order at entry
+  is rejected ("sell stop ... [rejected]"). Fix: |price-entry| < max(stops
+  level, 10 pts) -> MARKET immediately ("price at plan entry - broker min
+  distance"), lot recomputed at the real price - the instant fill IS the
+  plan price (user rule 3, straddle case). Confirmed working on the same
+  symbol: seconds later the chase path filled MARKET SELL 0.30 @ 10605.91
+  with SL/TP attached.
