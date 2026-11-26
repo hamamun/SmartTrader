@@ -50,9 +50,12 @@ Rule: no step is built until the user approves it here. Each step = few words, n
 - [x] Step 4 — Branch execution: detect, re-validate, declare (approved)
 - [x] Mi1 UI contract (approved)
 - [x] BUILD: Mi1 v2.00 implemented (SmartTrader.mq5) - pending user verification in MT5
-- [x] Mi2 Part 1 — Autotrading ORDER PLACEMENT (approved, section below)
-- [ ] Mi2 Part 2 — Order follow-up / close / exit, open + limit orders (design next)
-- [ ] BUILD: Mi2 autotrading (after Part 2 approved; brain untouched, hands added)
+- [x] Mi2 Part 1 — Autotrading ORDER PLACEMENT (approved)
+- [x] Mi2 Part 2 — FOLLOW-UP open + resting orders (approved)
+- [x] Mi2 Part 3 — CLOSING FACTORS (approved; +1R tail stop parked to build session)
+- [x] Mi2 Panel — autotrading section (approved, section below)
+- [ ] BUILD: Mi2 autotrading (brain untouched, hands added; +1R decision answered
+      in the build session, as the user parked it there)
 - [ ] Step 5 — History exam (replay approved rules, honest stats; must also report
       how autotrading functioned) — done AFTER autotrading per user re-ordering
 - [ ] Step 6 — Demo forward test (scoreboard)
@@ -187,6 +190,32 @@ retires. The plan is the boss; the position obeys.
 **Still parked (separate discussion):**
 - autotrading panel section (mode, per-TF state, real SL/TP as placed,
   P/L in R-multiples)
+
+---
+
+## Mi2 Panel — AUTOTRADING SECTION (approved)
+
+Position: BELOW the event line, always visible on the main panel (also when
+autotrading is OFF - with "--" rows, so silence never hides a position).
+
+- Header row (gold): "AUTOTRADING OFF - forecast only" / "AUTOTRADING ON
+  (mode) [hedging/netting]" - the mode and account type always visible.
+- ONE SEPARATE SECTION PER TIMEFRAME (user rule), two physical rows per TF
+  (420px width - never truncate):
+    M5   BUY 0.08  entry 1.09438
+         SL 1.09386 (-4.46)  TP 1.09460 (+3.12)  P/L +1.02
+    M15  -- entry --  lot --  sl --  tp --  p/l --
+- Money figures (user's language): SL$ = entry->SL distance x lot, TP$ =
+  entry->TP distance x lot, via the broker's own tick value - shown in the
+  ACCOUNT CURRENCY (honest, not a literal "$").
+- Signs: SL always (-), TP always (+), P/L its real sign.
+- P/L of a real position = the broker's own realtime position profit
+  (BUY valued at bid, SELL at ask); a waiting limit shows P/L "--"
+  (nothing earned, nothing pretended); refresh every second.
+- Honesty markers: BE armed -> "SL BE (+/-0.00)"; after the parked +1R
+  decision (if partials chosen) lot reads "X of Y"; limit waiting row shows
+  "LIMIT BUY 0.08 @ price (waiting)" with its SL/TP money beneath.
+- No order -> all "--" placeholders per TF (user rule).
 
 ---
 
