@@ -345,6 +345,7 @@ struct SDecl
    int               outcome;       // DO_*
    int               barsAge;
    bool              beArmed;
+   double            beLevel;       // +1R lock line: entry +/- 5% of risk (room), else entry
   };
 
 //====================================================================//
@@ -434,7 +435,7 @@ public:
       decl.branch=""; decl.entry=0; decl.sl=0; decl.tp1=0;
       decl.lots=0; decl.remLots=0; decl.bestFav=0; decl.tpUpdates=0;
       decl.durBars=0;
-      decl.outcome=DO_ACTIVE; decl.barsAge=0; decl.beArmed=false;
+      decl.outcome=DO_ACTIVE; decl.barsAge=0; decl.beArmed=false; decl.beLevel=0;
      }
 
    double Body(int i)      { return(MathAbs(r[i].close - r[i].open)); }
@@ -1135,17 +1136,21 @@ public:
       if(decl.dir < 0 && r[1].low  < decl.bestFav) decl.bestFav = r[1].low;
 
       // SL / target outcome (after +1R the plan's stop lives at breakeven)
-      double effSL = (decl.beArmed ? decl.entry : decl.sl);
+      double effSL = (decl.beArmed ? (decl.beLevel != 0 ? decl.beLevel : decl.entry) : decl.sl);
       if(decl.dir > 0)
         {
          if(r[1].low  <= effSL)   { FinishDecl((decl.beArmed ? DO_BE : DO_SL),
-                                      (decl.beArmed ? "stopped at breakeven - half was banked" : "invalidated")); return; }
+                                      (decl.beArmed ? (decl.remLots < decl.lots ? "stopped at BE+ - half was banked"
+                                                                                : "stopped at BE+ (min lot - no split)")
+                                                    : "invalidated")); return; }
          if(r[1].high >= decl.tp1) { FinishDecl(DO_TP1, "target hit");  return; }
         }
       else
         {
          if(r[1].high >= effSL)   { FinishDecl((decl.beArmed ? DO_BE : DO_SL),
-                                      (decl.beArmed ? "stopped at breakeven - half was banked" : "invalidated")); return; }
+                                      (decl.beArmed ? (decl.remLots < decl.lots ? "stopped at BE+ - half was banked"
+                                                                                : "stopped at BE+ (min lot - no split)")
+                                                    : "invalidated")); return; }
          if(r[1].low  <= decl.tp1) { FinishDecl(DO_TP1, "target hit");  return; }
         }
       if(decl.barsAge >= decl.durBars)   // time-left 0: the estimate is spent
@@ -1160,8 +1165,19 @@ public:
          double lmin  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
          double half  = decl.lots/2.0;
          if(lstep > 0) half = MathFloor(half/lstep)*lstep;
-         decl.remLots = (half >= lmin && half > 0 ? half : decl.lots); // too small to split -> keep full
-         AddEvent("[" + tfName + "] +1R reached - half banked, stop to breakeven");
+         bool split = (half >= lmin && half > 0 && half < decl.lots);
+         decl.remLots = (split ? half : decl.lots);   // min lot -> no split, whole trails
+         // lock line: entry + 5% of the RISK distance into profit (covers
+         // spread/costs) when price still leaves room, else plain entry
+         double lock = (decl.dir > 0 ? decl.entry + 0.05*slDist
+                                     : decl.entry - 0.05*slDist);
+         bool room = (decl.dir > 0 ? r[1].close > lock + 0.1*slDist
+                                   : r[1].close < lock - 0.1*slDist);
+         decl.beLevel = (room ? lock : decl.entry);
+         AddEvent("[" + tfName + "] +1R reached - " +
+                  (split ? "half banked (" + DoubleToString(decl.remLots,2) + " of " +
+                           DoubleToString(decl.lots,2) + "), stop to BE+" 
+                         : "min lot, no split - stop to BE+, whole rides"));
         }
 
       //--- move health (the human's "is it going as expected?")
@@ -1596,7 +1612,8 @@ string DeclLine(const SDecl &d, bool compact)
           "   SL " + DoubleToString(d.sl,_Digits) +
           "\nTP " + DoubleToString(d.tp1,_Digits) +
           (d.tpUpdates > 0 ? "  (updated " + IntegerToString(d.tpUpdates) + "x by candles)" : "") +
-          "\nlot " + DoubleToString(d.remLots,2) + " of " + DoubleToString(d.lots,2) +
+          "\nlot " + DoubleToString(d.remLots,2) +
+          (d.remLots < d.lots ? " of " + DoubleToString(d.lots,2) : "") +
           "\ntime-left " +
           IntegerToString((d.durBars - d.barsAge > 0 ? d.durBars - d.barsAge : 0)) +
           " of " + IntegerToString(d.durBars) + " bars" +

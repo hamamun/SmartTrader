@@ -185,8 +185,13 @@ retires. The plan is the boss; the position obeys.
   fits the bot's natural-pause shelves):
   1. Do NOTHING until +1R (early BE moves get shaken out by noise).
   2. At +1R: close HALF the position for real (cash secured), move the
-     stop to breakeven - the trade can no longer lose money. Positions too
-     small to split (e.g. 0.01): protect whole, trail whole.
+     stop to the LOCK LINE (USER refinement): entry + 5% OF THE RISK
+     DISTANCE into profit (covers spread/costs) when price still leaves
+     room (else plain entry) - the trade can no longer lose money.
+     MIN-LOT answer (user asked): lot at broker minimum from the start ->
+     NO split at all (broker cannot take 0.005); whole position is
+     protected at the lock line and trails whole - trailing never skipped;
+     panel shows plain "lot 0.01", event says "min lot, no split".
   3. TRAIL (structure, under every rest step): each closed candle after +1R,
      find the newest natural pause BEHIND price; if it sits above the current
      stop with >= 0.3R improvement, move the broker-side stop up to it.
@@ -222,8 +227,9 @@ autotrading is OFF - with "--" rows, so silence never hides a position).
 - P/L of a real position = the broker's own realtime position profit
   (BUY valued at bid, SELL at ask); a waiting limit shows P/L "--"
   (nothing earned, nothing pretended); refresh every second.
-- Honesty markers: BE armed -> "SL BE (+/-0.00)"; after the parked +1R
-  decision (if partials chosen) lot reads "X of Y"; limit waiting row shows
+- Honesty markers: BE armed -> SL row shows the REAL lock line (entry+5% of
+  risk, or entry) with its money figure; partials happened -> lot "X of Y",
+  plain lot when no split (min lot); limit waiting row shows
   "LIMIT BUY 0.08 @ price (waiting)" with its SL/TP money beneath.
 - No order -> all "--" placeholders per TF (user rule).
 
